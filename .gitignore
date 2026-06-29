@@ -1,0 +1,15 @@
+# compiled binary
+/sb
+/cmd/sb/sb
+
+# never commit credentials / local state
+*.cookie
+cookie
+*.token
+
+# audio cache
+shanbay-cli-audio/
+
+# OS / editor
+.DS_Store
+*.swp
