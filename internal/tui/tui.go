@@ -1,9 +1,11 @@
 // Package tui is a bubbletea front-end for the study loop: one card at a time,
-// single-key grading, auto-advancing through turns until the day's queue is done.
+// single-key grading, then it reveals the definition + examples before advancing,
+// auto-playing pronunciation. It loops through turns until the day's queue is done.
 package tui
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -14,6 +16,11 @@ import (
 	"shanbay-cli/internal/audio"
 	"shanbay-cli/internal/study"
 )
+
+// tagRe strips inline markup like <vocab>word</vocab> from example sentences.
+var tagRe = regexp.MustCompile("<[^>]+>")
+
+func clean(s string) string { return strings.TrimSpace(tagRe.ReplaceAllString(s, "")) }
 
 type phase int
 
@@ -43,9 +50,11 @@ type Model struct {
 	sess     *study.Session
 	cards    []study.Card
 	idx      int
-	revealed bool
-	known    map[string]bool
-	graded   int // graded in the current turn
+	graded   int             // graded in the current turn
+	curDone  bool            // current card graded → showing answer (def+examples)
+	curKnown bool            // the grade chosen for the current card
+	known    map[string]bool // known marks for the current turn
+	examples map[string][]api.Example
 	turn     int
 	prevSig  string
 	quitting bool
@@ -67,15 +76,18 @@ type submittedMsg struct {
 	status        *api.BookStatus
 	graded, known int
 }
+type examplesLoadedMsg struct {
+	id       string
+	examples []api.Example
+}
 type errMsg struct{ err error }
 
 // New builds the initial model.
 func New(cfg Config) Model {
-	return Model{cfg: cfg, phase: phaseLoading, known: map[string]bool{}}
+	return Model{cfg: cfg, phase: phaseLoading, known: map[string]bool{}, examples: map[string][]api.Example{}}
 }
 
-// Err returns a terminal error encountered during the run (e.g. auth failure),
-// so the caller can react (re-login + retry).
+// Err returns a terminal error (e.g. auth failure) so the caller can re-login.
 func (m Model) Err() error { return m.err }
 
 func (m Model) Init() tea.Cmd { return m.loadTurnCmd() }
@@ -112,6 +124,14 @@ func (m Model) submitCmd() tea.Cmd {
 	}
 }
 
+// onCardShown plays pronunciation and prefetches examples for the current card.
+func (m Model) onCardShown() tea.Cmd {
+	if m.idx >= len(m.cards) {
+		return nil
+	}
+	return tea.Batch(m.audioCmd(), m.examplesCmd(m.cards[m.idx].ItemID))
+}
+
 func (m Model) audioCmd() tea.Cmd {
 	if !m.cfg.Audio || m.idx >= len(m.cards) {
 		return nil
@@ -121,6 +141,20 @@ func (m Model) audioCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg { _ = audio.Play(url); return nil }
+}
+
+func (m Model) examplesCmd(id string) tea.Cmd {
+	if _, ok := m.examples[id]; ok || id == "" {
+		return nil // already loaded
+	}
+	client := m.cfg.Client
+	return func() tea.Msg {
+		ex, err := client.GetExamples(id)
+		if err != nil {
+			ex = nil // best-effort
+		}
+		return examplesLoadedMsg{id: id, examples: ex}
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -148,11 +182,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cards = cards[:rem]
 			}
 		}
-		m.sess, m.cards, m.idx, m.revealed = msg.sess, cards, 0, false
+		m.sess, m.cards, m.idx = msg.sess, cards, 0
+		m.curDone, m.curKnown = false, false
 		m.known, m.graded, m.prevSig = map[string]bool{}, 0, msg.sig
 		m.turn++
 		m.phase = phaseStudying
-		return m, m.audioCmd()
+		return m, m.onCardShown()
+	case examplesLoadedMsg:
+		if msg.examples == nil {
+			msg.examples = []api.Example{}
+		}
+		m.examples[msg.id] = msg.examples
+		return m, nil
 	case submittedMsg:
 		m.totalGraded += msg.graded
 		m.totalKnown += msg.known
@@ -171,8 +212,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
-		m.quitting = true
-		m.phase = phaseDone
 		return m, tea.Quit
 	}
 	if m.phase != phaseStudying {
@@ -190,17 +229,28 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.phase = phaseSubmitting
 		return m, m.submitCmd()
-	case " ", "space", "enter":
-		m.revealed = true
-		return m, nil
 	case "p":
 		return m, m.audioCmd()
-	case "k": // 认识
-		m.known[m.cards[m.idx].ItemID] = true
-		m.graded++
-		return m.advance()
-	case "f", "j": // 不认识
-		m.graded++
+	}
+
+	if !m.curDone {
+		// asking: grade the card, then show the answer
+		switch msg.String() {
+		case "k":
+			m.known[m.cards[m.idx].ItemID] = true
+			m.curKnown = true
+			m.curDone = true
+			m.graded++
+		case "f", "j":
+			m.curDone = true
+			m.graded++
+		}
+		return m, nil
+	}
+
+	// answer shown: advance on space/enter/n/→
+	switch msg.String() {
+	case " ", "space", "enter", "n", "right":
 		return m.advance()
 	}
 	return m, nil
@@ -208,12 +258,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) advance() (tea.Model, tea.Cmd) {
 	m.idx++
-	m.revealed = false
+	m.curDone, m.curKnown = false, false
 	if m.idx >= len(m.cards) {
 		m.phase = phaseSubmitting
 		return m, m.submitCmd()
 	}
-	return m, m.audioCmd()
+	return m, m.onCardShown()
 }
 
 // ---- view ----
@@ -223,9 +273,10 @@ var (
 	ipaStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	dimStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	defStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	enStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
 	tagNew    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("● 新词")
 	tagReview = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render("● 复习")
-	cardStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 3).Width(52)
+	cardStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 3).Width(58)
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	okStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
@@ -256,27 +307,69 @@ func (m Model) studyView() string {
 	header := fmt.Sprintf("第 %d 组   %d/%d   %s   队列 新%d/复习%d",
 		m.turn, m.idx+1, len(m.cards), tag, len(m.sess.AItems), len(m.sess.CItems))
 
-	var inner strings.Builder
-	inner.WriteString(wordStyle.Render(card.Word))
+	var b strings.Builder
+	b.WriteString(wordStyle.Render(card.Word))
 	if card.IPAUS != "" {
-		inner.WriteString("   ")
-		inner.WriteString(ipaStyle.Render("/" + card.IPAUS + "/"))
+		b.WriteString("   ")
+		b.WriteString(ipaStyle.Render("/" + card.IPAUS + "/"))
 	}
-	inner.WriteString("\n\n")
-	if m.revealed {
+	if m.curDone {
+		if m.curKnown {
+			b.WriteString("   ")
+			b.WriteString(okStyle.Render("✓ 认识"))
+		} else {
+			b.WriteString("   ")
+			b.WriteString(errStyle.Render("✗ 不认识"))
+		}
+	}
+	b.WriteString("\n")
+
+	if !m.curDone {
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("你认识吗?"))
+	} else {
+		b.WriteString("\n")
 		if len(card.Defs) == 0 {
-			inner.WriteString(dimStyle.Render("(无释义)"))
+			b.WriteString(dimStyle.Render("(无释义)"))
+			b.WriteString("\n")
 		}
 		for _, d := range card.Defs {
-			inner.WriteString(defStyle.Render(d))
-			inner.WriteString("\n")
+			b.WriteString(defStyle.Render(d))
+			b.WriteString("\n")
 		}
-	} else {
-		inner.WriteString(dimStyle.Render("〔空格 显示释义〕"))
+		b.WriteString(m.examplesBlock(card.ItemID))
 	}
 
-	help := helpStyle.Render("空格/↵ 释义    k 认识    f 不认识    p 发音    q 退出并保存")
-	return "\n" + dimStyle.Render(header) + "\n" + cardStyle.Render(inner.String()) + "\n" + help + "\n"
+	help := "k 认识    f 不认识    p 发音    q 退出"
+	if m.curDone {
+		help = "↵/空格 下一个    p 发音    q 退出并保存"
+	}
+	return "\n" + dimStyle.Render(header) + "\n" + cardStyle.Render(b.String()) + "\n" + helpStyle.Render(help) + "\n"
+}
+
+func (m Model) examplesBlock(id string) string {
+	ex, ok := m.examples[id]
+	if !ok {
+		return "\n" + dimStyle.Render("例句加载中…")
+	}
+	if len(ex) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("例句:"))
+	b.WriteString("\n")
+	n := min(len(ex), 2)
+	for _, e := range ex[:n] {
+		b.WriteString(enStyle.Render("• " + clean(e.ContentEN)))
+		b.WriteString("\n")
+		if cn := clean(e.ContentCN); cn != "" {
+			b.WriteString("  ")
+			b.WriteString(dimStyle.Render(cn))
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 func (m Model) doneView() string {

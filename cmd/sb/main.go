@@ -7,7 +7,7 @@
 //	sb study [flags]          interactive study loop (loops through turns)
 //	    --review              also present review words for grading
 //	    --limit N             grade at most N words this run (0 = until done)
-//	    --audio               play US pronunciation on reveal
+//	    --mute                disable pronunciation (auto-plays by default)
 //	    --dry-run             print the first turn's submit body, do NOT send
 //
 // Login state is checked at startup: a missing or expired cookie triggers an
@@ -213,12 +213,13 @@ func runStudy(c *api.Client, args []string) error {
 	review := fs.Bool("review", false, "also present review words for grading")
 	limit := fs.Int("limit", 0, "grade at most N words this run (0 = until done)")
 	dry := fs.Bool("dry-run", false, "print the first turn's submit body, do not send")
-	withAudio := fs.Bool("audio", false, "play US pronunciation on reveal")
+	mute := fs.Bool("mute", false, "disable pronunciation (on by default)")
 	plain := fs.Bool("plain", false, "use the simple line UI instead of the TUI")
 	_ = fs.Parse(args)
 
-	if *withAudio && !audio.Available() {
-		fmt.Fprintln(os.Stderr, "提示:未找到音频播放器,--audio 无声。可 sudo apt install mpg123")
+	useAudio := !*mute
+	if useAudio && !audio.Available() {
+		fmt.Fprintln(os.Stderr, "提示:未找到音频播放器,发音不可用(可 sudo apt install mpg123)。")
 	}
 
 	book, err := c.CurrentBook()
@@ -232,7 +233,7 @@ func runStudy(c *api.Client, args []string) error {
 	if !*plain && !*dry && isTTY() {
 		prog := tea.NewProgram(tui.New(tui.Config{
 			Client: c, MBID: mbid, BookName: book.Materialbook.Name,
-			Review: *review, Audio: *withAudio, Limit: *limit,
+			Review: *review, Audio: useAudio, Limit: *limit,
 		}))
 		fm, err := prog.Run()
 		if err != nil {
@@ -290,7 +291,7 @@ func runStudy(c *api.Client, args []string) error {
 		gradedThisTurn := 0
 		for i, card := range prompt {
 			fmt.Printf("[%d/%d] %s   /%s/\n", i+1, len(prompt), card.Word, card.IPAUS)
-			if *withAudio && card.AudioUS != "" {
+			if useAudio && card.AudioUS != "" {
 				go audio.Play(card.AudioUS) //nolint:errcheck // best-effort
 			}
 			fmt.Print("       (回车看释义) ")
