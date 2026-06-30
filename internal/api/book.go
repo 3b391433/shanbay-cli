@@ -1,6 +1,10 @@
 package api
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 // Book-scoped learning endpoints under /wordsapp/user_material_books/{materialbookId}/...
 // This is the family the current account actually uses (the global
@@ -81,22 +85,43 @@ func bookPath(mbid, suffix string) string {
 	return fmt.Sprintf("/wordsapp/user_material_books/%s/%s", mbid, suffix)
 }
 
+// retryNotReady polls fn while it returns ErrDataNotReady. On a new day the
+// learning data is computed lazily server-side: the first request 412s, then it
+// becomes ready within a few seconds (the web client polls 20×500ms the same way).
+func (c *Client) retryNotReady(fn func() error) error {
+	const attempts = 20
+	const delay = 500 * time.Millisecond
+	var err error
+	for i := range attempts {
+		if err = fn(); !errors.Is(err, ErrDataNotReady) {
+			return err
+		}
+		if i < attempts-1 {
+			time.Sleep(delay)
+		}
+	}
+	return err
+}
+
 func (c *Client) BookStatus(mbid string) (*BookStatus, error) {
 	var s BookStatus
-	return &s, c.getJSON(bookPath(mbid, "learning/statuses"), &s)
+	err := c.retryNotReady(func() error { return c.getJSON(bookPath(mbid, "learning/statuses"), &s) })
+	return &s, err
 }
 
 func (c *Client) BookSync(mbid string) (*SyncItems, error) {
 	var s SyncItems
-	return &s, c.getJSON(bookPath(mbid, "learning/items/sync"), &s)
+	err := c.retryNotReady(func() error { return c.getJSON(bookPath(mbid, "learning/items/sync"), &s) })
+	return &s, err
 }
 
-// BookTodayItems returns today's NEW/REVIEW words (decoded). May return
-// ErrDataNotReady until the day's session is initialized.
+// BookTodayItems returns today's NEW/REVIEW words (decoded). It polls past the
+// transient ErrDataNotReady that occurs before the day's session is initialized.
 func (c *Client) BookTodayItems(mbid, typeOf string, page, ipp int) (*TodayItems, error) {
 	var t TodayItems
 	p := bookPath(mbid, fmt.Sprintf("learning/words/today_learning_items?type_of=%s&page=%d&ipp=%d", typeOf, page, ipp))
-	return &t, c.getEncoded(p, &t)
+	err := c.retryNotReady(func() error { return c.getEncoded(p, &t) })
+	return &t, err
 }
 
 // SubmitItems sends graded results (PUT). This mutates real learning progress.
