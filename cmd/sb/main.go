@@ -29,11 +29,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"shanbay-cli/internal/api"
-	"shanbay-cli/internal/audio"
-	"shanbay-cli/internal/auth"
-	"shanbay-cli/internal/study"
-	"shanbay-cli/internal/tui"
+	"github.com/3b391433/shanbay-cli/internal/api"
+	"github.com/3b391433/shanbay-cli/internal/audio"
+	"github.com/3b391433/shanbay-cli/internal/auth"
+	"github.com/3b391433/shanbay-cli/internal/study"
+	"github.com/3b391433/shanbay-cli/internal/tui"
 )
 
 func main() {

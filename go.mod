@@ -1,4 +1,4 @@
-module shanbay-cli
+module github.com/3b391433/shanbay-cli
 
 go 1.25.0
 

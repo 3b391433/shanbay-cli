@@ -13,9 +13,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"shanbay-cli/internal/api"
-	"shanbay-cli/internal/audio"
-	"shanbay-cli/internal/study"
+	"github.com/3b391433/shanbay-cli/internal/api"
+	"github.com/3b391433/shanbay-cli/internal/audio"
+	"github.com/3b391433/shanbay-cli/internal/study"
 )
 
 // tagRe strips inline markup like <vocab>word</vocab> from example sentences.

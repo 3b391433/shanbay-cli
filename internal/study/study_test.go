@@ -3,7 +3,7 @@ package study
 import (
 	"testing"
 
-	"shanbay-cli/internal/api"
+	"github.com/3b391433/shanbay-cli/internal/api"
 )
 
 // TestBuildSubmitGrades verifies the three grades map to the right submit shape:

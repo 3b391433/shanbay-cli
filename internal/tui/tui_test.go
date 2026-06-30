@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"shanbay-cli/internal/api"
-	"shanbay-cli/internal/study"
+	"github.com/3b391433/shanbay-cli/internal/api"
+	"github.com/3b391433/shanbay-cli/internal/study"
 )
 
 func studyingModel() Model {

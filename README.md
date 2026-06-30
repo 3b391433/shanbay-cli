@@ -1,60 +1,103 @@
-# shanbay-cli
+# shanbay-cli (`sb`)
 
-终端背单词 CLI(扇贝单词)。逆向 `apiv3.shanbay.com` 私有接口,复用浏览器登录态。
+> 在终端里背扇贝单词。
 
-> 完整调研/接口契约/解码算法见 `~/my-projects/plans/shanbay-cli/research.md`。
+`sb` 是一个命令行背单词工具:看词 → 判断「认识 / 不认识 / 太简单」→ 自动揭晓中文释义和例句 → 进度实时同步回你的[扇贝单词](https://web.shanbay.com/wordsweb/)账号。带发音、复习、每日目标,全程键盘操作。
 
-## 状态
-- ✅ M0 响应解码移植(`internal/decode`),4 个真实加密向量 golden 测试通过。
-- ✅ M1 认证 + API client(`internal/auth`、`internal/api`),`sb status` / `sb lookup` 实测可用。
-- ✅ M2 提交契约(`PUT items/sync`,必须整轮完整集合 + 认识 schedule=3),真实联调通过。
-- ✅ M3 学习引擎 `sb study`:拉队列→展示→评分→提交→进度递增,全链路实测。
-- ✅ M5(主要)`sb goal` 每日目标、`--audio` 发音、多轮循环(背完自动下一组)。
-- ✅ 登录:`sb login` 粘贴 curl 自动解析 cookie;运行时检测失效自动提示重登。
-- ✅ M4 bubbletea TUI:`sb study` 默认进 TUI(单键 k/f、空格翻卡、p 发音、多轮自动续、带框卡片+完成统计);非 TTY / `--plain` / `--dry-run` 回退行模式。
-- ⬜ 词书切换。
+> ⚠️ 非官方工具,基于扇贝 web 端私有接口实现,仅供个人账号自用学习。接口可能随扇贝改版失效。
 
-## 结构
-```
-cmd/sb/            CLI 入口(status / lookup)
-internal/auth/     cookie 加载、CSRF 提取、JWT 过期检查
-internal/api/      http client、端点、数据模型(集成解码)
-internal/decode/   bayDecode 移植 + golden 测试(testdata/*.enc|.json)
-```
+## 功能
 
-## 使用
+- 🎴 **卡片式 TUI**:单键评分(`k` 认识 / `f` 不认识 / `e` 太简单),自动翻到下一词
+- 🔊 **自动发音**:出词读单词美音,揭晓后读例句
+- 📖 **释义 + 例句**:评分后展示中文释义和英/中例句
+- 🔁 **新词 + 复习**:一组背完自动续下一组,直到当天清空
+- 🎯 **每日目标**可调;「太简单」标记已掌握、不再复习
+- ☁️ 进度实时写回扇贝账号
+
+## 安装
+
+### 下载预编译二进制(推荐)
+
+从 [Releases](https://github.com/3b391433/shanbay-cli/releases/latest) 下载对应平台并放进 `PATH`:
+
 ```bash
-# 1. 登录:浏览器 F12 → 任意 apiv3.shanbay.com 请求 → 复制为 cURL,然后粘贴:
-go run ./cmd/sb login   # 自动解析 cookie 存到 ~/.config/shanbay-cli/cookie(未登录/过期时其他命令也会自动提示)
-
-# 2. 运行
-go run ./cmd/sb status
-go run ./cmd/sb lookup serendipity
-go run ./cmd/sb goal                   # 看每日新词目标 + 可选值
-go run ./cmd/sb goal 30                 # 设每日目标为 30
-go run ./cmd/sb study                  # 背单词(终端里默认进 TUI:k/f 评分,空格翻卡)
-go run ./cmd/sb study --review --audio # 同时复习 + 发音(需 mpg123/gst-play)
-go run ./cmd/sb study --limit 10       # 本次最多背 10 个
-go run ./cmd/sb study --plain          # 用简单行模式(或 --dry-run 只预览不写回)
-# 临时指定 cookie 文件:
-SHANBAY_COOKIE_FILE=/path/to/cookie go run ./cmd/sb status
+# Linux x86_64 示例(其它平台把文件名换成对应的)
+curl -fL -o sb.tar.gz https://github.com/3b391433/shanbay-cli/releases/latest/download/sb-linux-amd64.tar.gz
+tar -xzf sb.tar.gz
+install -m 0755 sb-linux-amd64 ~/.local/bin/sb     # 确保 ~/.local/bin 在 PATH
 ```
 
-## 测试
+平台文件名:`sb-linux-amd64` · `sb-linux-arm64` · `sb-darwin-amd64`(Intel Mac)· `sb-darwin-arm64`(Apple 芯片)。
+
+### 用 Go 安装
+
 ```bash
-go test ./...            # 解码 golden + 拒绝明文
+go install github.com/3b391433/shanbay-cli/cmd/sb@latest
 ```
 
-## 发布 (CI/CD)
-- 每次 push / PR 到 `main`:`ci` 工作流跑 `go vet` / `go test` / `gofmt` 检查。
-- 推送 `v*` tag:`release` 工作流交叉编译并发布到 GitHub Release:
-  ```bash
-  git tag v0.1.0 && git push origin v0.1.0
-  ```
-  产物:`sb-{linux,darwin}-{amd64,arm64}.tar.gz`(纯 Go,CGO 关闭)。
-- 安装:从 Release 下载对应平台,解压后 `chmod +x sb-* && mv sb-* ~/go/bin/sb`(或任意 PATH 目录)。
+### 从源码构建
+
+```bash
+git clone https://github.com/3b391433/shanbay-cli && cd shanbay-cli
+go build -o sb ./cmd/sb
+```
+
+> 发音可选,依赖系统播放器之一:`mpg123` / `ffplay` / `mpv` / `gst-play-1.0`(没有则静默,不影响背单词)。
+
+## 快速开始
+
+首次使用先登录(复用你浏览器的扇贝登录态):
+
+```bash
+sb login
+```
+
+按提示操作:浏览器打开并登录 [web.shanbay.com](https://web.shanbay.com/wordsweb/) → 按 `F12` 打开开发者工具 → 「网络」面板里随便找一条 `apiv3.shanbay.com` 的请求 → 右键「复制为 cURL」→ 粘贴回终端,空行回车结束。
+
+`sb` 会自动解析其中的 cookie 并保存到 `~/.config/shanbay-cli/cookie`。登录态失效时任意命令也会自动提示重新粘贴。
+
+## 用法
+
+```bash
+sb study                 # 背单词(进入 TUI)
+sb study --review        # 同时复习
+sb study --limit 20      # 本次最多 20 个
+sb study --mute          # 关闭发音
+sb study --plain         # 简易行模式(非 TUI)
+
+sb goal                  # 查看每日新词目标
+sb goal 30               # 设为 30
+
+sb lookup serendipity    # 查词
+sb status                # 账号 / 当前词书 / 今日进度
+```
+
+TUI 里的按键:
+
+| 键 | 作用 |
+|---|---|
+| `k` | 认识 |
+| `f` | 不认识 |
+| `e` | 太简单(标记已掌握,不再复习) |
+| `空格` / `↵` | 看完释义例句后,下一词 |
+| `p` | 重新发音 |
+| `q` | 结束并提交进度 |
+
+切换词书暂未支持,请在扇贝 App / 网页上切换;`sb` 跟随当前词书。
 
 ## 注意
-- cookie 含登录态,勿入 git;`auth_token`(JWT)约 3 个月过期,过期用 `sb login` 重新粘贴。
-- 接口为私有逆向,扇贝改版可能失效;解码逻辑集中在 `internal/decode`,易替换。
-- 仅个人账号自用。
+
+- cookie 是你的登录凭据,**不要分享或提交到 git**。`auth_token` 约 3 个月过期,过期后 `sb login` 重新粘贴即可。
+- 仅供个人账号自用;请勿用于批量请求或绕过扇贝的限制。
+
+## 开发
+
+```bash
+go test ./...     # 单元测试(解码 golden、提交语义、TUI 逻辑,均离线)
+go vet ./...
+```
+
+CI/CD(GitHub Actions):push / PR 跑 `ci`(vet + test + gofmt);推 `v*` tag 触发 `release`,自动交叉编译 4 个平台并发布到 Releases。
+
+解码算法参考自 [honwhy/shanbay-ext](https://github.com/honwhy/shanbay-ext)。

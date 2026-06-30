@@ -11,7 +11,7 @@ package study
 import (
 	"fmt"
 
-	"shanbay-cli/internal/api"
+	"github.com/3b391433/shanbay-cli/internal/api"
 )
 
 type Type string

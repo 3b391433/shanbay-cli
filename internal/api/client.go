@@ -15,8 +15,8 @@ import (
 	"net/url"
 	"time"
 
-	"shanbay-cli/internal/auth"
-	"shanbay-cli/internal/decode"
+	"github.com/3b391433/shanbay-cli/internal/auth"
+	"github.com/3b391433/shanbay-cli/internal/decode"
 )
 
 const BaseURL = "https://apiv3.shanbay.com"
