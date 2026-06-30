@@ -45,6 +45,15 @@ SHANBAY_COOKIE_FILE=/path/to/cookie go run ./cmd/sb status
 go test ./...            # 解码 golden + 拒绝明文
 ```
 
+## 发布 (CI/CD)
+- 每次 push / PR 到 `main`:`ci` 工作流跑 `go vet` / `go test` / `gofmt` 检查。
+- 推送 `v*` tag:`release` 工作流交叉编译并发布到 GitHub Release:
+  ```bash
+  git tag v0.1.0 && git push origin v0.1.0
+  ```
+  产物:`sb-{linux,darwin}-{amd64,arm64}.tar.gz`(纯 Go,CGO 关闭)。
+- 安装:从 Release 下载对应平台,解压后 `chmod +x sb-* && mv sb-* ~/go/bin/sb`(或任意 PATH 目录)。
+
 ## 注意
 - cookie 含登录态,勿入 git;`auth_token`(JWT)约 3 个月过期,过期用 `sb login` 重新粘贴。
 - 接口为私有逆向,扇贝改版可能失效;解码逻辑集中在 `internal/decode`,易替换。

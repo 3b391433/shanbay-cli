@@ -1,0 +1,37 @@
+name: release
+
+# 推送 v* tag(如 v0.1.0)时:交叉编译 linux/mac 二进制并发布到 Release。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
+      - name: Build (linux/darwin, amd64/arm64)
+        run: |
+          mkdir -p dist
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            export GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0
+            name="sb-${GOOS}-${GOARCH}"
+            echo "building $name"
+            go build -trimpath -ldflags "-s -w" -o "dist/$name" ./cmd/sb
+            tar -czf "dist/$name.tar.gz" -C dist "$name"
+            rm "dist/$name"
+          done
+          ls -la dist
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
