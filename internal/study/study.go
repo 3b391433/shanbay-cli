@@ -99,17 +99,45 @@ func Load(c *api.Client, mbid string, withReviewContent bool) (*Session, error) 
 }
 
 // Cards returns the words to present: NEW always, REVIEW when includeReview.
-func (s *Session) Cards(includeReview bool) []Card {
-	var cards []Card
+// mixed interleaves new and review words (else new-first then review).
+func (s *Session) Cards(includeReview, mixed bool) []Card {
+	newC := make([]Card, 0, len(s.AItems))
 	for _, it := range s.AItems {
-		cards = append(cards, s.card(it, New))
+		newC = append(newC, s.card(it, New))
 	}
-	if includeReview {
-		for _, it := range s.CItems {
-			cards = append(cards, s.card(it, Review))
+	if !includeReview {
+		return newC
+	}
+	revC := make([]Card, 0, len(s.CItems))
+	for _, it := range s.CItems {
+		revC = append(revC, s.card(it, Review))
+	}
+	if !mixed {
+		return append(newC, revC...)
+	}
+	return interleave(newC, revC)
+}
+
+// interleave evenly spreads two slices (proportional merge), preserving order.
+func interleave(a, b []Card) []Card {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	out := make([]Card, 0, len(a)+len(b))
+	ai, bi := 0, 0
+	for ai < len(a) || bi < len(b) {
+		if bi >= len(b) || (ai < len(a) && float64(ai)/float64(len(a)) <= float64(bi)/float64(len(b))) {
+			out = append(out, a[ai])
+			ai++
+		} else {
+			out = append(out, b[bi])
+			bi++
 		}
 	}
-	return cards
+	return out
 }
 
 func (s *Session) card(it api.SyncItem, typ Type) Card {

@@ -68,7 +68,9 @@ type Config struct {
 	BookName string
 	Review   bool
 	Audio    bool
-	Limit    int
+	Limit    int  // 本次总上限(0=不限)
+	Group    int  // 每组单词数(0=整队列)
+	Mixed    bool // 新词与复习混合穿插
 }
 
 // Model is the bubbletea model (exported so callers can read Err after Run).
@@ -128,7 +130,7 @@ func (m Model) loadTurnCmd() tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		cards := sess.Cards(cfg.Review)
+		cards := sess.Cards(cfg.Review, cfg.Mixed)
 		if len(cards) == 0 {
 			return turnEmptyMsg{first: first}
 		}
@@ -214,6 +216,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case turnLoadedMsg:
 		cards := msg.cards
+		if m.cfg.Group > 0 && m.cfg.Group < len(cards) {
+			cards = cards[:m.cfg.Group] // 每组只呈现 Group 个
+		}
 		if m.cfg.Limit > 0 {
 			rem := m.cfg.Limit - m.totalGraded
 			if rem <= 0 {

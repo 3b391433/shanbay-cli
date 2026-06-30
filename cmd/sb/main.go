@@ -1,14 +1,18 @@
-// Command sb is the shanbay vocabulary CLI.
+// Command sb is the shanbay vocabulary CLI. Bare `sb` runs `sb study`.
 //
-//	sb login                  paste a curl; parse + save the login cookie
-//	sb status                 account + current book + today's counts
-//	sb lookup <word>          dictionary lookup (decoded)
-//	sb goal [N]               show daily new-word goal, or set it
-//	sb study [flags]          interactive study loop (loops through turns)
-//	    --review              also present review words for grading
-//	    --limit N             grade at most N words this run (0 = until done)
-//	    --mute                disable pronunciation (auto-plays by default)
-//	    --dry-run             print the first turn's submit body, do NOT send
+//	sb                        = sb study(默认背单词:每组 10、新词与复习混合)
+//	sb login                  粘贴 curl,解析并保存登录态
+//	sb status                 账号 / 当前词书 / 今日进度
+//	sb lookup <word>          查词
+//	sb goal [N]               查看/设置每日新词目标
+//	sb study [flags]          背单词
+//	    --new-only            只背新词(默认含复习)
+//	    --order mixed|new-first  排列方式(默认 mixed 混合)
+//	    --group N             每组单词数(默认 10,0=整队列)
+//	    --limit N             本次最多 N 个(0=直到清空)
+//	    --mute                关闭发音(默认开)
+//	    --plain               简易行模式(非 TUI)
+//	    --dry-run             只打印将提交的 body,不发送
 //
 // Login state is checked at startup: a missing or expired cookie triggers an
 // interactive paste-a-curl login. A 401/403 mid-command also triggers re-login
@@ -37,11 +41,12 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: sb <login|status|lookup|goal|study> ...")
-		os.Exit(2)
+	// 裸 `sb` 或以 flag 开头(如 `sb --review`)默认走 study;否则首个参数是子命令。
+	args := os.Args[1:]
+	cmd, cmdArgs := "study", args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		cmd, cmdArgs = args[0], args[1:]
 	}
-	cmd := os.Args[1]
 
 	if cmd == "login" {
 		doLogin()
@@ -56,16 +61,16 @@ func main() {
 		case "status":
 			return runStatus(client, creds)
 		case "lookup":
-			if len(os.Args) < 3 {
+			if len(cmdArgs) < 1 {
 				return errors.New("usage: sb lookup <word>")
 			}
-			return runLookup(client, os.Args[2])
+			return runLookup(client, cmdArgs[0])
 		case "goal":
-			return runGoal(client, os.Args[2:])
+			return runGoal(client, cmdArgs)
 		case "study":
-			return runStudy(client, os.Args[2:])
+			return runStudy(client, cmdArgs)
 		default:
-			return fmt.Errorf("unknown command: %s", cmd)
+			return fmt.Errorf("未知命令: %s(可用: study/status/lookup/goal/login)", cmd)
 		}
 	}
 
@@ -210,13 +215,17 @@ func runGoal(c *api.Client, args []string) error {
 
 func runStudy(c *api.Client, args []string) error {
 	fs := flag.NewFlagSet("study", flag.ExitOnError)
-	review := fs.Bool("review", false, "also present review words for grading")
-	limit := fs.Int("limit", 0, "grade at most N words this run (0 = until done)")
-	dry := fs.Bool("dry-run", false, "print the first turn's submit body, do not send")
-	mute := fs.Bool("mute", false, "disable pronunciation (on by default)")
-	plain := fs.Bool("plain", false, "use the simple line UI instead of the TUI")
+	newOnly := fs.Bool("new-only", false, "只背新词(默认含复习)")
+	order := fs.String("order", "mixed", "排列: mixed(混合) | new-first(先新后复)")
+	group := fs.Int("group", 10, "每组单词数(0=整队列一次过)")
+	limit := fs.Int("limit", 0, "本次最多背 N 个(0=直到清空)")
+	dry := fs.Bool("dry-run", false, "只打印将提交的 body,不发送")
+	mute := fs.Bool("mute", false, "关闭发音(默认开)")
+	plain := fs.Bool("plain", false, "用简易行模式代替 TUI")
 	_ = fs.Parse(args)
 
+	review := !*newOnly
+	mixed := *order != "new-first"
 	useAudio := !*mute
 	if useAudio && !audio.Available() {
 		fmt.Fprintln(os.Stderr, "提示:未找到音频播放器,发音不可用(可 sudo apt install mpg123)。")
@@ -233,7 +242,8 @@ func runStudy(c *api.Client, args []string) error {
 	if !*plain && !*dry && isTTY() {
 		prog := tea.NewProgram(tui.New(tui.Config{
 			Client: c, MBID: mbid, BookName: book.Materialbook.Name,
-			Review: *review, Audio: useAudio, Limit: *limit,
+			Review: review, Audio: useAudio, Limit: *limit,
+			Group: *group, Mixed: mixed,
 		}))
 		fm, err := prog.Run()
 		if err != nil {
@@ -251,11 +261,11 @@ func runStudy(c *api.Client, args []string) error {
 	prevSig := ""
 
 	for turn := 1; turn <= 100; turn++ {
-		sess, err := study.Load(c, mbid, *review)
+		sess, err := study.Load(c, mbid, review)
 		if err != nil {
 			return err
 		}
-		cards := sess.Cards(*review)
+		cards := sess.Cards(review, mixed)
 		if len(cards) == 0 {
 			if turn == 1 {
 				fmt.Println("队列为空 — 今天没有待学/待复习的词(或已全部完成)。")
@@ -271,6 +281,9 @@ func runStudy(c *api.Client, args []string) error {
 		}
 
 		prompt := cards
+		if *group > 0 && *group < len(prompt) {
+			prompt = prompt[:*group] // 每组只呈现 group 个
+		}
 		if *limit > 0 {
 			rem := *limit - totalGraded
 			if rem <= 0 {

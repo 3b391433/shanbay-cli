@@ -60,15 +60,15 @@ sb login
 ## 用法
 
 ```bash
-sb study                 # 背单词(进入 TUI)
-sb study --review        # 同时复习
-sb study --limit 20      # 本次最多 20 个
-sb study --mute          # 关闭发音
-sb study --plain         # 简易行模式(非 TUI)
+sb                       # = sb study:背单词。默认每组 10 个、新词与复习混合穿插
+sb --new-only            # 只背新词(默认含复习)
+sb --group 15            # 每组 15 个(默认 10;0 = 整队列一次过)
+sb --order new-first     # 先背新词再复习(默认 mixed 混合)
+sb --limit 20            # 本次最多背 20 个
+sb --mute                # 关闭发音(默认开)
+sb --plain               # 简易行模式(非 TUI)
 
-sb goal                  # 查看每日新词目标
-sb goal 30               # 设为 30
-
+sb goal 30               # 每日新词目标设为 30(sb goal 查看)
 sb lookup serendipity    # 查词
 sb status                # 账号 / 当前词书 / 今日进度
 ```
@@ -80,7 +80,8 @@ TUI 里的按键:
 | `k` | 认识 |
 | `f` | 不认识 |
 | `e` | 太简单(标记已掌握,不再复习) |
-| `空格` / `↵` | 看完释义例句后,下一词 |
+| `空格` / `↵` | 看完释义例句后,进入下一词 |
+| `k` `f` `e` | (揭晓后)对当前词改判 |
 | `p` | 重新发音 |
 | `q` | 结束并提交进度 |
 
