@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -127,4 +128,15 @@ func (c *Client) BookTodayItems(mbid, typeOf string, page, ipp int) (*TodayItems
 // SubmitItems sends graded results (PUT). This mutates real learning progress.
 func (c *Client) SubmitItems(mbid string, body SubmitBody) error {
 	return c.putJSON(bookPath(mbid, "learning/items/sync"), body, nil)
+}
+
+// NextTurn asks the server for another group of words ("再来一组"). Allowed only
+// when BookStatus.CanInitNextTurn is true; the server caps it at 3 extra groups/day.
+func (c *Client) NextTurn(mbid string) error {
+	p := bookPath(mbid, "learning/next_turn")
+	body, status, err := c.do(http.MethodPost, p, nil)
+	if err != nil {
+		return err
+	}
+	return statusErr(p, status, body)
 }

@@ -269,6 +269,16 @@ func runStudy(c *api.Client, args []string) error {
 		}
 		cards := sess.Cards(review, mixed)
 		if len(cards) == 0 {
+			if sess.CanNextTurn && !*dry {
+				fmt.Print("\n🎉 本轮完成。再来一组?[y/N]: ")
+				if sc.Scan() && strings.TrimSpace(strings.ToLower(sc.Text())) == "y" {
+					if err := c.NextTurn(mbid); err != nil {
+						return err
+					}
+					prevSig = ""
+					continue
+				}
+			}
 			if turn == 1 {
 				fmt.Println("队列为空 — 今天没有待学/待复习的词(或已全部完成)。")
 			} else {

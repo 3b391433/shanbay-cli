@@ -35,20 +35,17 @@ func renderEN(s string) string {
 		}
 	}
 	for {
-		i := strings.Index(s, "<vocab>")
-		if i < 0 {
-			emit(s, enStyle)
+		before, after, found := strings.Cut(s, "<vocab>")
+		emit(before, enStyle)
+		if !found {
 			return b.String()
 		}
-		emit(s[:i], enStyle)
-		rest := s[i+len("<vocab>"):]
-		j := strings.Index(rest, "</vocab>")
-		if j < 0 {
-			emit(rest, vocabStyle)
+		word, rest, closed := strings.Cut(after, "</vocab>")
+		emit(word, vocabStyle)
+		if !closed {
 			return b.String()
 		}
-		emit(rest[:j], vocabStyle)
-		s = rest[j+len("</vocab>"):]
+		s = rest
 	}
 }
 
@@ -58,6 +55,7 @@ const (
 	phaseLoading phase = iota
 	phaseStudying
 	phaseSubmitting
+	phaseMore // 本轮完成,询问是否「再来一组」
 	phaseDone
 	phaseError
 )
@@ -104,7 +102,8 @@ type turnLoadedMsg struct {
 	cards []study.Card
 	sig   string
 }
-type turnEmptyMsg struct{ first bool }
+type turnEmptyMsg struct{ first, canNext bool }
+type reloadMsg struct{}
 type submittedMsg struct {
 	status        *api.BookStatus
 	graded, known int
@@ -137,7 +136,7 @@ func (m Model) loadTurnCmd() tea.Cmd {
 		}
 		cards := sess.Cards(cfg.Review, cfg.Mixed)
 		if len(cards) == 0 {
-			return turnEmptyMsg{first: first}
+			return turnEmptyMsg{first: first, canNext: sess.CanNextTurn}
 		}
 		sig := sigOf(sess)
 		if sig == prevSig {
@@ -157,6 +156,17 @@ func (m Model) submitCmd() tea.Cmd {
 		}
 		st, _ := cfg.Client.BookStatus(cfg.MBID)
 		return submittedMsg{status: st, graded: graded, known: nk}
+	}
+}
+
+// nextTurnCmd requests another group ("再来一组") then reloads.
+func (m Model) nextTurnCmd() tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		if err := cfg.Client.NextTurn(cfg.MBID); err != nil {
+			return errMsg{err}
+		}
+		return reloadMsg{}
 	}
 }
 
@@ -212,6 +222,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.phase, m.err = phaseError, msg.err
 		return m, tea.Quit
 	case turnEmptyMsg:
+		if msg.canNext {
+			m.phase = phaseMore // 可「再来一组」,等用户选择
+			return m, nil
+		}
 		m.phase = phaseDone
 		if msg.first {
 			m.doneMsg = "队列为空 — 今天没有待学/待复习的词(或已全部完成)。"
@@ -219,6 +233,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.doneMsg = "🎉 今日队列已清空。"
 		}
 		return m, tea.Quit
+	case reloadMsg:
+		m.phase = phaseLoading
+		m.prevSig = "" // 新一组,允许重新加载
+		return m, m.loadTurnCmd()
 	case turnLoadedMsg:
 		cards := msg.cards
 		if m.cfg.Group > 0 && m.cfg.Group < len(cards) {
@@ -273,6 +291,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
 	k := m.cfg.Keys
 
+	if m.phase == phaseMore {
+		switch {
+		case keymap.Has(k.Quit, s):
+			m.phase = phaseDone
+			return m, tea.Quit
+		case keymap.Has(k.Next, s):
+			m.phase = phaseLoading
+			return m, m.nextTurnCmd() // 再来一组
+		}
+		return m, nil
+	}
 	if m.phase != phaseStudying {
 		if keymap.Has(k.Quit, s) {
 			return m, tea.Quit
@@ -384,6 +413,8 @@ func (m Model) View() string {
 		return "\n  加载中…\n"
 	case phaseSubmitting:
 		return "\n  提交中…\n"
+	case phaseMore:
+		return m.moreView()
 	case phaseError:
 		return "\n" + errStyle.Render("错误:"+m.err.Error()) + "\n"
 	case phaseDone:
@@ -475,6 +506,27 @@ func (m Model) examplesBlock(id string) string {
 			b.WriteString("\n")
 		}
 	}
+	return b.String()
+}
+
+func (m Model) moreView() string {
+	k := m.cfg.Keys
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(m.bookTitle())
+	b.WriteString(okStyle.Render("🎉 本轮完成"))
+	if m.totalGraded > 0 {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("   已学 %d(认识/掌握 %d)", m.totalGraded, m.totalKnown)))
+	}
+	b.WriteString("\n")
+	if m.status != nil {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("进度:新词 %d/%d,复习 %d/%d",
+			m.status.AFinishedCount, m.status.ACount, m.status.CFinishedCount, m.status.CCount)))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "再来一组?   %s 再来一组    %s 结束   (每日最多 3 组)\n",
+		keymap.First(k.Next), keymap.First(k.Quit))
 	return b.String()
 }
 

@@ -51,6 +51,7 @@ type Session struct {
 	MBID         string
 	Date         string
 	LearningTime int
+	CanNextTurn  bool // 本轮做完后可「再来一组」(每日上限 3 组)
 	AItems       []api.SyncItem
 	CItems       []api.SyncItem
 	Content      map[string]api.VocabWithSenses
@@ -94,7 +95,8 @@ func Load(c *api.Client, mbid string, withReviewContent bool) (*Session, error) 
 	}
 	return &Session{
 		MBID: mbid, Date: status.Date, LearningTime: status.LearningTime,
-		AItems: sync.ANotFinished, CItems: sync.CNotFinished, Content: content,
+		CanNextTurn: status.CanInitNextTurn,
+		AItems:      sync.ANotFinished, CItems: sync.CNotFinished, Content: content,
 	}, nil
 }
 

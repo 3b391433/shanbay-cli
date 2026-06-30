@@ -223,6 +223,27 @@ func TestEnterAsKnownAndNext(t *testing.T) {
 	}
 }
 
+func TestNextTurnFlow(t *testing.T) {
+	// 本轮空但可再来一组 → phaseMore(不结束)
+	m2, _ := New(Config{}).Update(turnEmptyMsg{canNext: true})
+	if m2.(Model).phase != phaseMore {
+		t.Fatalf("canNext empty 应进 phaseMore, got %d", m2.(Model).phase)
+	}
+	// phaseMore 按 next(空格)→ 触发再来一组(loading + cmd)
+	m3, cmd := m2.(Model).Update(key(" "))
+	if m3.(Model).phase != phaseLoading || cmd == nil {
+		t.Fatalf("phaseMore next 应重新加载: phase=%d cmd=%v", m3.(Model).phase, cmd != nil)
+	}
+	// phaseMore 按 quit(esc)→ done
+	if m4, _ := m2.(Model).Update(tea.KeyMsg{Type: tea.KeyEsc}); m4.(Model).phase != phaseDone {
+		t.Fatalf("phaseMore quit 应 done, got %d", m4.(Model).phase)
+	}
+	// 不能再来一组 → 直接 done
+	if m5, _ := New(Config{}).Update(turnEmptyMsg{canNext: false}); m5.(Model).phase != phaseDone {
+		t.Fatalf("无 canNext 应 done, got %d", m5.(Model).phase)
+	}
+}
+
 // TestSnapshot prints the rendered views; run with SNAP=1 to eyeball layout.
 func TestSnapshot(t *testing.T) {
 	if os.Getenv("SNAP") == "" {
