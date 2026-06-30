@@ -23,6 +23,10 @@ const (
 
 const knownSchedule = 3 // api Nn.KNOWN
 
+// ConsecutiveKnown is how many consecutive 认识 a word needs before it leaves
+// the queue (一次不认识清零重来;太简单不受此限,一次即出队)。
+const ConsecutiveKnown = 2
+
 // Grade is the user's judgment for a card.
 type Grade int
 

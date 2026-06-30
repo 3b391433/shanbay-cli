@@ -312,6 +312,7 @@ func runStudy(c *api.Client, args []string) error {
 		fmt.Printf("\n—— 第 %d 组:%d 词(队列 新 %d / 复习 %d)——\n", turn, len(prompt), len(sess.AItems), len(sess.CItems))
 
 		grades := map[string]study.Grade{}
+		knownStreak := map[string]int{}
 		queue := append([]study.Card{}, prompt...)
 		groupTotal := len(queue)
 		quit, touched := false, false
@@ -339,14 +340,21 @@ func runStudy(c *api.Client, args []string) error {
 			case keymap.Has(keys.Quit, ans):
 				quit = true
 			case keymap.Has(keys.Known, ans):
-				grades[card.ItemID] = study.Known
-				queue = queue[1:]
 				touched = true
+				knownStreak[card.ItemID]++
+				if knownStreak[card.ItemID] >= study.ConsecutiveKnown {
+					grades[card.ItemID] = study.Known
+					queue = queue[1:]
+				} else {
+					queue = append(append([]study.Card{}, queue[1:]...), card)
+					fmt.Println("       ✓ 认识,再巩固一次")
+				}
 			case keymap.Has(keys.TooEasy, ans):
 				grades[card.ItemID] = study.TooEasy
 				queue = queue[1:]
 				touched = true
-			default: // 不认识 → 轮到队尾,稍后再来
+			default: // 不认识 → 清零连续计数,轮到队尾
+				knownStreak[card.ItemID] = 0
 				queue = append(append([]study.Card{}, queue[1:]...), card)
 				touched = true
 				fmt.Println("       ✗ 不认识,稍后再来")

@@ -19,12 +19,13 @@ func noANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
 func studyingModel() Model {
 	return Model{
-		cfg:      Config{BookName: "日常生活汇总单词", Keys: keymap.Default()},
-		phase:    phaseStudying,
-		grades:   map[string]study.Grade{},
-		examples: map[string][]api.Example{},
-		turn:     1,
-		sess:     &study.Session{AItems: []api.SyncItem{{ItemID: "a"}, {ItemID: "b"}}},
+		cfg:         Config{BookName: "日常生活汇总单词", Keys: keymap.Default()},
+		phase:       phaseStudying,
+		grades:      map[string]study.Grade{},
+		knownStreak: map[string]int{},
+		examples:    map[string][]api.Example{},
+		turn:        1,
+		sess:        &study.Session{AItems: []api.SyncItem{{ItemID: "a"}, {ItemID: "b"}}},
 		cards: []study.Card{
 			{ItemID: "a", Word: "alpha", IPAUS: "ˈælfə", Type: study.New, Defs: []string{"[n.] 第一"}},
 			{ItemID: "b", Word: "bravo", Type: study.New},
@@ -32,36 +33,61 @@ func studyingModel() Model {
 	}
 }
 
+func oneCardModel() Model {
+	return Model{
+		cfg:         Config{Keys: keymap.Default()},
+		phase:       phaseStudying,
+		grades:      map[string]study.Grade{},
+		knownStreak: map[string]int{},
+		examples:    map[string][]api.Example{},
+		turn:        1,
+		sess:        &study.Session{AItems: []api.SyncItem{{ItemID: "a"}}},
+		cards:       []study.Card{{ItemID: "a", Word: "alpha"}},
+	}
+}
+
 func key(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
 
-func TestGradeFlowAndRequeue(t *testing.T) {
-	m := studyingModel() // cards: a, b
+// step grades the current card then advances (空格).
+func step(m Model, gradeKey string) Model {
+	m2, _ := m.Update(key(gradeKey))
+	m3, _ := m2.(Model).Update(key(" "))
+	return m3.(Model)
+}
 
-	// 认识 a:揭晓但不前进(advance 时才记入)
+func TestKnownTwiceToFinish(t *testing.T) {
+	// 认识一次 → 重排队,仍在学
+	m := step(oneCardModel(), "k")
+	if m.phase != phaseStudying || len(m.cards) != 1 || m.knownStreak["a"] != 1 || m.grades["a"] == study.Known {
+		t.Fatalf("第一次认识应重排队: phase=%d len=%d streak=%d", m.phase, len(m.cards), m.knownStreak["a"])
+	}
+	// 再认识 → 连续两次,出队 → 组空 → 提交
 	m2, _ := m.Update(key("k"))
-	mm := m2.(Model)
-	if !mm.curDone || mm.curResult != study.Known || len(mm.cards) != 2 {
-		t.Fatalf("k: curDone=%v result=%v len=%d", mm.curDone, mm.curResult, len(mm.cards))
+	m3, cmd := m2.(Model).Update(key(" "))
+	mm := m3.(Model)
+	if mm.phase != phaseSubmitting || cmd == nil || mm.grades["a"] != study.Known {
+		t.Fatalf("连续两次认识应出队提交: phase=%d grade=%v", mm.phase, mm.grades["a"])
 	}
-	// 下一词:a 学会出队
-	m3, _ := mm.Update(key(" "))
-	mm = m3.(Model)
-	if mm.grades["a"] != study.Known || mm.groupDone != 1 || len(mm.cards) != 1 || mm.cards[0].ItemID != "b" {
-		t.Fatalf("advance(known): grade=%v done=%d cards=%d", mm.grades["a"], mm.groupDone, len(mm.cards))
+}
+
+func TestUnknownResetsKnownStreak(t *testing.T) {
+	m := step(oneCardModel(), "k") // streak 1
+	m = step(m, "f")               // 不认识 → 清零
+	if m.knownStreak["a"] != 0 {
+		t.Fatalf("不认识应清零连续计数, streak=%d", m.knownStreak["a"])
 	}
-	// 不认识 b → 下一词后轮回队尾(仍在学,不提交)
-	m4, _ := mm.Update(key("f"))
-	m5, _ := m4.(Model).Update(key(" "))
-	mm = m5.(Model)
-	if mm.phase != phaseStudying || len(mm.cards) != 1 || mm.cards[0].ItemID != "b" {
-		t.Fatalf("不认识应重排队继续学: phase=%d cards=%d", mm.phase, len(mm.cards))
+	m = step(m, "k") // 又认识一次,但只算 1(非连续 2)→ 不出队
+	if m.phase != phaseStudying || m.grades["a"] == study.Known {
+		t.Fatalf("中断后单次认识不应出队: phase=%d", m.phase)
 	}
-	// 这次认识 b → 出队 → 组空 → 提交
-	m6, _ := mm.Update(key("k"))
-	m7, cmd := m6.(Model).Update(key(" "))
-	mm = m7.(Model)
-	if mm.phase != phaseSubmitting || cmd == nil || mm.grades["b"] != study.Known {
-		t.Fatalf("组学完应提交: phase=%d cmd=%v grade_b=%v", mm.phase, cmd != nil, mm.grades["b"])
+}
+
+func TestTooEasyFinishesOnce(t *testing.T) {
+	m2, _ := oneCardModel().Update(key("e"))
+	m3, cmd := m2.(Model).Update(key(" "))
+	mm := m3.(Model)
+	if mm.phase != phaseSubmitting || cmd == nil || mm.grades["a"] != study.TooEasy {
+		t.Fatalf("太简单应一次出队提交: phase=%d grade=%v", mm.phase, mm.grades["a"])
 	}
 }
 
@@ -209,11 +235,11 @@ func TestEnterAsKnownAndNext(t *testing.T) {
 	if mm.curResult != study.Known || !mm.curDone || len(mm.cards) != 2 {
 		t.Fatalf("asking enter 应=认识+揭晓: result=%v done=%v", mm.curResult, mm.curDone)
 	}
-	// 揭晓态:enter = 下一词(a 学会出队)
+	// 揭晓态:enter = 下一词(a 认识一次→轮到队尾,前进到 b)
 	m3, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	mm = m3.(Model)
-	if len(mm.cards) != 1 || mm.cards[0].ItemID != "b" || mm.grades["a"] != study.Known {
-		t.Fatalf("revealed enter 应前进: cards=%d grade_a=%v", len(mm.cards), mm.grades["a"])
+	if mm.cards[0].ItemID != "b" {
+		t.Fatalf("revealed enter 应前进到下一词, cards0=%s", mm.cards[0].ItemID)
 	}
 }
 

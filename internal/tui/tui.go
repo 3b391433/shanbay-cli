@@ -78,19 +78,20 @@ type Config struct {
 type Model struct {
 	cfg Config
 
-	phase      phase
-	sess       *study.Session
-	cards      []study.Card           // 当前组工作队列(FIFO,cards[0]=当前)
-	curDone    bool                   // 当前词已评分,正在展示答案
-	curResult  study.Grade            // 当前词的判定
-	grades     map[string]study.Grade // 已判定为 认识/太简单 的词(提交用)
-	touched    bool                   // 本轮是否评过分
-	groupTotal int                    // 本组初始词数
-	groupDone  int                    // 本组已学会数
-	examples   map[string][]api.Example
-	turn       int
-	prevSig    string
-	quitting   bool
+	phase       phase
+	sess        *study.Session
+	cards       []study.Card           // 当前组工作队列(FIFO,cards[0]=当前)
+	curDone     bool                   // 当前词已评分,正在展示答案
+	curResult   study.Grade            // 当前词的判定
+	grades      map[string]study.Grade // 已判定为 认识/太简单 的词(提交用)
+	knownStreak map[string]int         // 各词连续「认识」次数(达标才出队)
+	touched     bool                   // 本轮是否评过分
+	groupTotal  int                    // 本组初始词数
+	groupDone   int                    // 本组已学会数
+	examples    map[string][]api.Example
+	turn        int
+	prevSig     string
+	quitting    bool
 
 	totalKnown int // 本次累计学会(认识+太简单)
 	status     *api.BookStatus
@@ -121,7 +122,7 @@ func New(cfg Config) Model {
 	if cfg.Keys.Empty() {
 		cfg.Keys = keymap.Default()
 	}
-	return Model{cfg: cfg, phase: phaseLoading, grades: map[string]study.Grade{}, examples: map[string][]api.Example{}}
+	return Model{cfg: cfg, phase: phaseLoading, grades: map[string]study.Grade{}, knownStreak: map[string]int{}, examples: map[string][]api.Example{}}
 }
 
 // Err returns a terminal error (e.g. auth failure) so the caller can re-login.
@@ -253,7 +254,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sess, m.cards = msg.sess, cards
 		m.groupTotal, m.groupDone = len(cards), 0
 		m.curDone, m.curResult = false, study.Unknown
-		m.grades, m.touched, m.prevSig = map[string]study.Grade{}, false, msg.sig
+		m.grades, m.knownStreak, m.touched, m.prevSig = map[string]study.Grade{}, map[string]int{}, false, msg.sig
 		m.turn++
 		m.phase = phaseStudying
 		return m, m.onCardShown()
@@ -365,13 +366,23 @@ func (m *Model) grade(g study.Grade)    { m.setGrade(g); m.curDone = true }
 // advance applies the current grade: 认识/太简单 finish the word (leave queue),
 // 不认识 rotates it to the back to study again. Submits when the queue empties.
 func (m Model) advance() (tea.Model, tea.Cmd) {
-	card := m.cards[0]
-	if m.curResult == study.Unknown {
-		m.cards = append(append([]study.Card{}, m.cards[1:]...), card) // 轮到队尾,稍后再来
-	} else {
-		m.grades[card.ItemID] = m.curResult
-		m.groupDone++
-		m.cards = m.cards[1:]
+	id := m.cards[0].ItemID
+	finish := func() { m.grades[id] = m.curResult; m.groupDone++; m.cards = m.cards[1:] }
+	requeue := func() { m.cards = append(append([]study.Card{}, m.cards[1:]...), m.cards[0]) }
+
+	switch m.curResult {
+	case study.TooEasy:
+		finish() // 太简单:一次即出队
+	case study.Known:
+		m.knownStreak[id]++
+		if m.knownStreak[id] >= study.ConsecutiveKnown {
+			finish() // 连续认识达标,出队
+		} else {
+			requeue() // 还需再认识一次巩固
+		}
+	default: // Unknown:清零连续计数,轮到队尾
+		m.knownStreak[id] = 0
+		requeue()
 	}
 	m.curDone, m.curResult = false, study.Unknown
 	if len(m.cards) == 0 {
@@ -441,7 +452,7 @@ func (m Model) studyView() string {
 	}
 	if m.curDone {
 		b.WriteString("   ")
-		b.WriteString(resultLabel(m.curResult))
+		b.WriteString(m.resultLabel())
 	}
 	b.WriteString("\n")
 
@@ -471,12 +482,15 @@ func (m Model) studyView() string {
 	return "\n" + m.bookTitle() + dimStyle.Render(header) + "\n" + cardStyle.Render(b.String()) + "\n" + helpStyle.Render(help) + "\n"
 }
 
-func resultLabel(g study.Grade) string {
-	switch g {
-	case study.Known:
-		return okStyle.Render("✓ 认识")
+func (m Model) resultLabel() string {
+	switch m.curResult {
 	case study.TooEasy:
 		return okStyle.Render("⏭ 太简单·已掌握(不再复习)")
+	case study.Known:
+		if m.knownStreak[m.cards[0].ItemID]+1 >= study.ConsecutiveKnown {
+			return okStyle.Render("✓ 认识 ✓ 已掌握")
+		}
+		return okStyle.Render("✓ 认识(再巩固一次)")
 	default:
 		return errStyle.Render("✗ 不认识(稍后再来)")
 	}
