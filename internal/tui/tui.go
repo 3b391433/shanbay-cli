@@ -18,10 +18,38 @@ import (
 	"github.com/3b391433/shanbay-cli/internal/study"
 )
 
-// tagRe strips inline markup like <vocab>word</vocab> from example sentences.
+// tagRe matches inline markup like <vocab>word</vocab> in example sentences.
 var tagRe = regexp.MustCompile("<[^>]+>")
 
-func clean(s string) string { return strings.TrimSpace(tagRe.ReplaceAllString(s, "")) }
+func stripTags(s string) string { return tagRe.ReplaceAllString(s, "") }
+func clean(s string) string     { return strings.TrimSpace(stripTags(s)) }
+
+// renderEN renders an English example sentence, emphasizing the target word and
+// its variants (the parts the API wraps in <vocab>…</vocab>).
+func renderEN(s string) string {
+	var b strings.Builder
+	emit := func(text string, style lipgloss.Style) {
+		if t := stripTags(text); t != "" {
+			b.WriteString(style.Render(t))
+		}
+	}
+	for {
+		i := strings.Index(s, "<vocab>")
+		if i < 0 {
+			emit(s, enStyle)
+			return b.String()
+		}
+		emit(s[:i], enStyle)
+		rest := s[i+len("<vocab>"):]
+		j := strings.Index(rest, "</vocab>")
+		if j < 0 {
+			emit(rest, vocabStyle)
+			return b.String()
+		}
+		emit(rest[:j], vocabStyle)
+		s = rest[j+len("</vocab>"):]
+	}
+}
 
 type phase int
 
@@ -313,18 +341,19 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 // ---- view ----
 
 var (
-	wordStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	ipaStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	dimStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	defStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
-	enStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
-	tagNew    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("● 新词")
-	tagReview = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render("● 复习")
-	cardStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 3).Width(58)
-	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	okStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	bookStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
+	wordStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	ipaStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	defStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	enStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
+	vocabStyle = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(lipgloss.Color("11"))
+	tagNew     = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("● 新词")
+	tagReview  = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render("● 复习")
+	cardStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 3).Width(58)
+	helpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	errStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	okStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	bookStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 )
 
 func (m Model) bookTitle() string {
@@ -419,7 +448,8 @@ func (m Model) examplesBlock(id string) string {
 	b.WriteString("\n")
 	n := min(len(ex), 2)
 	for _, e := range ex[:n] {
-		b.WriteString(enStyle.Render("• " + clean(e.ContentEN)))
+		b.WriteString(enStyle.Render("• "))
+		b.WriteString(renderEN(e.ContentEN))
 		b.WriteString("\n")
 		if cn := clean(e.ContentCN); cn != "" {
 			b.WriteString("  ")

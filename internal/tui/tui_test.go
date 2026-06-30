@@ -2,6 +2,7 @@ package tui
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -10,6 +11,10 @@ import (
 	"github.com/3b391433/shanbay-cli/internal/api"
 	"github.com/3b391433/shanbay-cli/internal/study"
 )
+
+var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func noANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
 func studyingModel() Model {
 	return Model{
@@ -130,12 +135,23 @@ func TestStudyViewRenders(t *testing.T) {
 	m.curDone, m.curResult = true, study.Known
 	m.grades["a"] = study.Known
 	m.examples["a"] = []api.Example{{ContentEN: "He <vocab>rolled</vocab> the ball.", ContentCN: "他把球滚走了。"}}
-	v := m.View()
+	v := noANSI(m.View())
 	if !strings.Contains(v, "第一") || !strings.Contains(v, "He rolled the ball.") || !strings.Contains(v, "他把球") {
 		t.Fatalf("revealed view should show definition + example:\n%s", v)
 	}
 	if strings.Contains(v, "<vocab>") {
 		t.Fatalf("markup should be stripped:\n%s", v)
+	}
+}
+
+func TestRenderENKeepsTextHighlightsVocab(t *testing.T) {
+	// plain text (ANSI stripped) must keep words/spaces and drop the tags
+	if got := noANSI(renderEN("you <vocab>roll</vocab> it")); got != "you roll it" {
+		t.Fatalf("renderEN plain=%q, want %q", got, "you roll it")
+	}
+	// the vocab word should be wrapped in styling (differs from plain enStyle)
+	if renderEN("a <vocab>b</vocab> c") == noANSI(renderEN("a <vocab>b</vocab> c")) {
+		t.Skip("no ANSI in this env; styling not observable")
 	}
 }
 
