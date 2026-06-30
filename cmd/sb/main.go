@@ -259,7 +259,7 @@ func runStudy(c *api.Client, args []string) error {
 
 	sc := bufio.NewScanner(os.Stdin)
 	start := time.Now()
-	totalGraded, totalKnown := 0, 0
+	totalKnown := 0
 	prevSig := ""
 
 	for turn := 1; turn <= 100; turn++ {
@@ -288,7 +288,7 @@ func runStudy(c *api.Client, args []string) error {
 		}
 		sig := sigOf(sess)
 		if sig == prevSig {
-			fmt.Println("\n队列未推进(上一组可能都标了不认识),停止。")
+			fmt.Println("\n🎉 今日队列已清空。")
 			break
 		}
 
@@ -297,7 +297,7 @@ func runStudy(c *api.Client, args []string) error {
 			prompt = prompt[:*group] // 每组只呈现 group 个
 		}
 		if *limit > 0 {
-			rem := *limit - totalGraded
+			rem := *limit - totalKnown
 			if rem <= 0 {
 				break
 			}
@@ -312,10 +312,12 @@ func runStudy(c *api.Client, args []string) error {
 		fmt.Printf("\n—— 第 %d 组:%d 词(队列 新 %d / 复习 %d)——\n", turn, len(prompt), len(sess.AItems), len(sess.CItems))
 
 		grades := map[string]study.Grade{}
-		quit := false
-		gradedThisTurn := 0
-		for i, card := range prompt {
-			fmt.Printf("[%d/%d] %s   /%s/\n", i+1, len(prompt), card.Word, card.IPAUS)
+		queue := append([]study.Card{}, prompt...)
+		groupTotal := len(queue)
+		quit, touched := false, false
+		for len(queue) > 0 {
+			card := queue[0]
+			fmt.Printf("[已会 %d/%d] %s   /%s/\n", groupTotal-len(queue), groupTotal, card.Word, card.IPAUS)
 			if useAudio && card.AudioUS != "" {
 				go audio.Play(card.AudioUS) //nolint:errcheck // best-effort
 			}
@@ -338,12 +340,16 @@ func runStudy(c *api.Client, args []string) error {
 				quit = true
 			case keymap.Has(keys.Known, ans):
 				grades[card.ItemID] = study.Known
-				gradedThisTurn++
+				queue = queue[1:]
+				touched = true
 			case keymap.Has(keys.TooEasy, ans):
 				grades[card.ItemID] = study.TooEasy
-				gradedThisTurn++
-			default: // keys.Unknown 或其它输入 = 不认识
-				gradedThisTurn++
+				queue = queue[1:]
+				touched = true
+			default: // 不认识 → 轮到队尾,稍后再来
+				queue = append(append([]study.Card{}, queue[1:]...), card)
+				touched = true
+				fmt.Println("       ✗ 不认识,稍后再来")
 			}
 			if quit {
 				break
@@ -353,7 +359,7 @@ func runStudy(c *api.Client, args []string) error {
 		if err := sc.Err(); err != nil {
 			return err
 		}
-		if gradedThisTurn == 0 {
+		if !touched {
 			if turn == 1 {
 				fmt.Println("未评分,退出(不提交)。")
 			}
@@ -371,21 +377,20 @@ func runStudy(c *api.Client, args []string) error {
 			return err
 		}
 		nk := len(body.AItemsKnown) + len(body.CItemsKnown)
-		totalGraded += gradedThisTurn
 		totalKnown += nk
-		fmt.Printf("  ✓ 第 %d 组已提交(认识/掌握 %d)\n", turn, nk)
+		fmt.Printf("  ✓ 第 %d 组已提交(学会 %d)\n", turn, nk)
 
 		if quit {
 			break
 		}
-		if *limit > 0 && totalGraded >= *limit {
+		if *limit > 0 && totalKnown >= *limit {
 			break
 		}
 		prevSig = sig
 	}
 
-	if totalGraded > 0 {
-		fmt.Printf("\n本次共评分 %d 词(认识 %d)。\n", totalGraded, totalKnown)
+	if totalKnown > 0 {
+		fmt.Printf("\n本次学会 %d 词。\n", totalKnown)
 		if st, err := c.BookStatus(mbid); err == nil {
 			fmt.Printf("当前进度:新词 %d/%d,复习 %d/%d,剩余 %d\n",
 				st.AFinishedCount, st.ACount, st.CFinishedCount, st.CCount, st.RemainingCount)

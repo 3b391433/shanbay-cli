@@ -1,7 +1,8 @@
-// Package tui is a bubbletea front-end for the study loop: one card at a time,
-// single-key grading (认识 / 不认识 / 太简单), then it reveals the definition +
-// examples before advancing, auto-playing pronunciation. It loops through turns
-// until the day's queue is done.
+// Package tui is a bubbletea front-end for the study loop. A group's words form
+// a FIFO queue: 认识/太简单 removes a word, 不认识 rotates it to the back so it
+// comes around again — the group ends (and submits) only when every word is
+// known, or the user quits. It auto-plays pronunciation, reveals the definition
+// and examples after grading, and offers 再来一组 when the daily plan is done.
 package tui
 
 import (
@@ -25,8 +26,8 @@ var tagRe = regexp.MustCompile("<[^>]+>")
 func stripTags(s string) string { return tagRe.ReplaceAllString(s, "") }
 func clean(s string) string     { return strings.TrimSpace(stripTags(s)) }
 
-// renderEN renders an English example sentence, emphasizing the target word and
-// its variants (the parts the API wraps in <vocab>…</vocab>).
+// renderEN renders an English example, emphasizing the target word/variants
+// (the parts the API wraps in <vocab>…</vocab>).
 func renderEN(s string) string {
 	var b strings.Builder
 	emit := func(text string, style lipgloss.Style) {
@@ -77,23 +78,24 @@ type Config struct {
 type Model struct {
 	cfg Config
 
-	phase     phase
-	sess      *study.Session
-	cards     []study.Card
-	idx       int
-	graded    int // graded in the current turn
-	curDone   bool
-	curResult study.Grade
-	grades    map[string]study.Grade
-	examples  map[string][]api.Example
-	turn      int
-	prevSig   string
-	quitting  bool
+	phase      phase
+	sess       *study.Session
+	cards      []study.Card           // 当前组工作队列(FIFO,cards[0]=当前)
+	curDone    bool                   // 当前词已评分,正在展示答案
+	curResult  study.Grade            // 当前词的判定
+	grades     map[string]study.Grade // 已判定为 认识/太简单 的词(提交用)
+	touched    bool                   // 本轮是否评过分
+	groupTotal int                    // 本组初始词数
+	groupDone  int                    // 本组已学会数
+	examples   map[string][]api.Example
+	turn       int
+	prevSig    string
+	quitting   bool
 
-	totalGraded, totalKnown int
-	status                  *api.BookStatus
-	doneMsg                 string
-	err                     error
+	totalKnown int // 本次累计学会(认识+太简单)
+	status     *api.BookStatus
+	doneMsg    string
+	err        error
 }
 
 // messages
@@ -105,8 +107,8 @@ type turnLoadedMsg struct {
 type turnEmptyMsg struct{ first, canNext bool }
 type reloadMsg struct{}
 type submittedMsg struct {
-	status        *api.BookStatus
-	graded, known int
+	status  *api.BookStatus
+	learned int
 }
 type examplesLoadedMsg struct {
 	id       string
@@ -138,24 +140,23 @@ func (m Model) loadTurnCmd() tea.Cmd {
 		if len(cards) == 0 {
 			return turnEmptyMsg{first: first, canNext: sess.CanNextTurn}
 		}
-		sig := sigOf(sess)
-		if sig == prevSig {
-			return turnEmptyMsg{first: false} // no progress since last submit
+		if sig := sigOf(sess); sig == prevSig {
+			// 理论上不该发生(每组学完才提交,not_finished 必然变化);兜底退出
+			return turnEmptyMsg{canNext: sess.CanNextTurn}
 		}
-		return turnLoadedMsg{sess: sess, cards: cards, sig: sig}
+		return turnLoadedMsg{sess: sess, cards: cards, sig: sigOf(sess)}
 	}
 }
 
 func (m Model) submitCmd() tea.Cmd {
 	cfg, sess, grades := m.cfg, m.sess, m.grades
-	graded, nk := m.graded, learned(m.grades)
+	learnedN := learned(grades)
 	return func() tea.Msg {
-		body := sess.BuildSubmit(grades, sess.LearningTime)
-		if err := cfg.Client.SubmitItems(cfg.MBID, body); err != nil {
+		if err := cfg.Client.SubmitItems(cfg.MBID, sess.BuildSubmit(grades, sess.LearningTime)); err != nil {
 			return errMsg{err}
 		}
 		st, _ := cfg.Client.BookStatus(cfg.MBID)
-		return submittedMsg{status: st, graded: graded, known: nk}
+		return submittedMsg{status: st, learned: learnedN}
 	}
 }
 
@@ -172,29 +173,26 @@ func (m Model) nextTurnCmd() tea.Cmd {
 
 // onCardShown plays pronunciation and prefetches examples for the current card.
 func (m Model) onCardShown() tea.Cmd {
-	if m.idx >= len(m.cards) {
+	if len(m.cards) == 0 {
 		return nil
 	}
-	return tea.Batch(m.audioCmd(), m.examplesCmd(m.cards[m.idx].ItemID))
+	return tea.Batch(m.audioCmd(), m.examplesCmd(m.cards[0].ItemID))
 }
 
 func (m Model) audioCmd() tea.Cmd {
-	if !m.cfg.Audio || m.idx >= len(m.cards) {
+	if !m.cfg.Audio || len(m.cards) == 0 || m.cards[0].AudioUS == "" {
 		return nil
 	}
-	url := m.cards[m.idx].AudioUS
-	if url == "" {
-		return nil
-	}
+	url := m.cards[0].AudioUS
 	return func() tea.Msg { _ = audio.Play(url); return nil }
 }
 
 // exampleAudioCmd plays the current card's first example sentence audio.
 func (m Model) exampleAudioCmd() tea.Cmd {
-	if !m.cfg.Audio || m.idx >= len(m.cards) {
+	if !m.cfg.Audio || len(m.cards) == 0 {
 		return nil
 	}
-	for _, e := range m.examples[m.cards[m.idx].ItemID] {
+	for _, e := range m.examples[m.cards[0].ItemID] {
 		if u := e.AudioURL(); u != "" {
 			return func() tea.Msg { _ = audio.Play(u); return nil }
 		}
@@ -243,7 +241,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cards = cards[:m.cfg.Group] // 每组只呈现 Group 个
 		}
 		if m.cfg.Limit > 0 {
-			rem := m.cfg.Limit - m.totalGraded
+			rem := m.cfg.Limit - m.totalKnown
 			if rem <= 0 {
 				m.phase, m.doneMsg = phaseDone, "已达本次上限。"
 				return m, tea.Quit
@@ -252,9 +250,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cards = cards[:rem]
 			}
 		}
-		m.sess, m.cards, m.idx = msg.sess, cards, 0
+		m.sess, m.cards = msg.sess, cards
+		m.groupTotal, m.groupDone = len(cards), 0
 		m.curDone, m.curResult = false, study.Unknown
-		m.grades, m.graded, m.prevSig = map[string]study.Grade{}, 0, msg.sig
+		m.grades, m.touched, m.prevSig = map[string]study.Grade{}, false, msg.sig
 		m.turn++
 		m.phase = phaseStudying
 		return m, m.onCardShown()
@@ -263,14 +262,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.examples = []api.Example{}
 		}
 		m.examples[msg.id] = msg.examples
-		// if this card's answer is already showing, play its example now
-		if m.curDone && m.idx < len(m.cards) && m.cards[m.idx].ItemID == msg.id {
+		if m.curDone && len(m.cards) > 0 && m.cards[0].ItemID == msg.id {
 			return m, m.exampleAudioCmd()
 		}
 		return m, nil
 	case submittedMsg:
-		m.totalGraded += msg.graded
-		m.totalKnown += msg.known
+		m.totalKnown += msg.learned
 		m.status = msg.status
 		if m.quitting {
 			m.phase = phaseDone
@@ -312,7 +309,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case keymap.Has(k.Quit, s):
 		m.quitting = true
-		if m.graded == 0 {
+		// 把当前已判定的「认识/太简单」也记入提交
+		if m.curDone && m.curResult != study.Unknown && len(m.cards) > 0 {
+			m.grades[m.cards[0].ItemID] = m.curResult
+		}
+		if !m.touched {
 			m.phase = phaseDone
 			return m, tea.Quit
 		}
@@ -358,24 +359,22 @@ func (m Model) gradeForKey(s string) (study.Grade, bool) {
 	return 0, false
 }
 
-// setGrade records/updates the judgment for the current card (also used to
-// re-grade after the answer is revealed). grades is shared by reference.
-func (m *Model) setGrade(g study.Grade) {
-	m.grades[m.cards[m.idx].ItemID] = g
-	m.curResult = g
-}
+func (m *Model) setGrade(g study.Grade) { m.curResult = g; m.touched = true }
+func (m *Model) grade(g study.Grade)    { m.setGrade(g); m.curDone = true }
 
-// grade is the first judgment on a card: it reveals the answer and counts it.
-func (m *Model) grade(g study.Grade) {
-	m.setGrade(g)
-	m.curDone = true
-	m.graded++
-}
-
+// advance applies the current grade: 认识/太简单 finish the word (leave queue),
+// 不认识 rotates it to the back to study again. Submits when the queue empties.
 func (m Model) advance() (tea.Model, tea.Cmd) {
-	m.idx++
+	card := m.cards[0]
+	if m.curResult == study.Unknown {
+		m.cards = append(append([]study.Card{}, m.cards[1:]...), card) // 轮到队尾,稍后再来
+	} else {
+		m.grades[card.ItemID] = m.curResult
+		m.groupDone++
+		m.cards = m.cards[1:]
+	}
 	m.curDone, m.curResult = false, study.Unknown
-	if m.idx >= len(m.cards) {
+	if len(m.cards) == 0 {
 		m.phase = phaseSubmitting
 		return m, m.submitCmd()
 	}
@@ -426,13 +425,13 @@ func (m Model) View() string {
 }
 
 func (m Model) studyView() string {
-	card := m.cards[m.idx]
+	card := m.cards[0]
 	tag := tagNew
 	if card.Type == study.Review {
 		tag = tagReview
 	}
-	header := fmt.Sprintf("第 %d 组   %d/%d   %s   队列 新%d/复习%d",
-		m.turn, m.idx+1, len(m.cards), tag, len(m.sess.AItems), len(m.sess.CItems))
+	header := fmt.Sprintf("第 %d 组   已会 %d/%d   %s   队列 新%d/复习%d",
+		m.turn, m.groupDone, m.groupTotal, tag, len(m.sess.AItems), len(m.sess.CItems))
 
 	var b strings.Builder
 	b.WriteString(wordStyle.Render(card.Word))
@@ -477,9 +476,9 @@ func resultLabel(g study.Grade) string {
 	case study.Known:
 		return okStyle.Render("✓ 认识")
 	case study.TooEasy:
-		return okStyle.Render("⏭ 太简单·已掌握(不再学习)")
+		return okStyle.Render("⏭ 太简单·已掌握(不再复习)")
 	default:
-		return errStyle.Render("✗ 不认识")
+		return errStyle.Render("✗ 不认识(稍后再来)")
 	}
 }
 
@@ -515,8 +514,8 @@ func (m Model) moreView() string {
 	b.WriteString("\n")
 	b.WriteString(m.bookTitle())
 	b.WriteString(okStyle.Render("🎉 本轮完成"))
-	if m.totalGraded > 0 {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("   已学 %d(认识/掌握 %d)", m.totalGraded, m.totalKnown)))
+	if m.totalKnown > 0 {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("   本次学会 %d 词", m.totalKnown)))
 	}
 	b.WriteString("\n")
 	if m.status != nil {
@@ -538,8 +537,8 @@ func (m Model) doneView() string {
 		b.WriteString(m.doneMsg)
 		b.WriteString("\n")
 	}
-	if m.totalGraded > 0 {
-		b.WriteString(okStyle.Render(fmt.Sprintf("本次共评分 %d 词(认识/掌握 %d)。", m.totalGraded, m.totalKnown)))
+	if m.totalKnown > 0 {
+		b.WriteString(okStyle.Render(fmt.Sprintf("本次学会 %d 词。", m.totalKnown)))
 		b.WriteString("\n")
 	}
 	if m.status != nil {

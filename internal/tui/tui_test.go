@@ -34,48 +34,42 @@ func studyingModel() Model {
 
 func key(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
 
-func TestGradeRevealsThenAdvances(t *testing.T) {
-	m := studyingModel()
+func TestGradeFlowAndRequeue(t *testing.T) {
+	m := studyingModel() // cards: a, b
 
-	// 认识: reveals, does NOT advance
+	// 认识 a:揭晓但不前进(advance 时才记入)
 	m2, _ := m.Update(key("k"))
 	mm := m2.(Model)
-	if !mm.curDone || mm.curResult != study.Known || mm.grades["a"] != study.Known {
-		t.Fatalf("k should grade 认识+reveal: curDone=%v result=%v grade=%v", mm.curDone, mm.curResult, mm.grades["a"])
+	if !mm.curDone || mm.curResult != study.Known || len(mm.cards) != 2 {
+		t.Fatalf("k: curDone=%v result=%v len=%d", mm.curDone, mm.curResult, len(mm.cards))
 	}
-	if mm.idx != 0 {
-		t.Fatalf("grading must not advance yet, idx=%d", mm.idx)
-	}
-
-	// space advances
+	// 下一词:a 学会出队
 	m3, _ := mm.Update(key(" "))
 	mm = m3.(Model)
-	if mm.idx != 1 || mm.curDone {
-		t.Fatalf("space should advance: idx=%d curDone=%v", mm.idx, mm.curDone)
+	if mm.grades["a"] != study.Known || mm.groupDone != 1 || len(mm.cards) != 1 || mm.cards[0].ItemID != "b" {
+		t.Fatalf("advance(known): grade=%v done=%d cards=%d", mm.grades["a"], mm.groupDone, len(mm.cards))
 	}
-
-	// 不认识 then advance past last card -> submit
+	// 不认识 b → 下一词后轮回队尾(仍在学,不提交)
 	m4, _ := mm.Update(key("f"))
-	mm = m4.(Model)
-	if mm.curResult != study.Unknown {
-		t.Fatalf("f should be 不认识, got %v", mm.curResult)
-	}
-	m5, cmd := mm.Update(key(" "))
+	m5, _ := m4.(Model).Update(key(" "))
 	mm = m5.(Model)
-	if mm.phase != phaseSubmitting || cmd == nil {
-		t.Fatalf("advancing past last card should submit: phase=%d cmd=%v", mm.phase, cmd != nil)
+	if mm.phase != phaseStudying || len(mm.cards) != 1 || mm.cards[0].ItemID != "b" {
+		t.Fatalf("不认识应重排队继续学: phase=%d cards=%d", mm.phase, len(mm.cards))
 	}
-	if mm.graded != 2 {
-		t.Fatalf("graded=%d, want 2", mm.graded)
+	// 这次认识 b → 出队 → 组空 → 提交
+	m6, _ := mm.Update(key("k"))
+	m7, cmd := m6.(Model).Update(key(" "))
+	mm = m7.(Model)
+	if mm.phase != phaseSubmitting || cmd == nil || mm.grades["b"] != study.Known {
+		t.Fatalf("组学完应提交: phase=%d cmd=%v grade_b=%v", mm.phase, cmd != nil, mm.grades["b"])
 	}
 }
 
 func TestTooEasyGrade(t *testing.T) {
-	m := studyingModel()
-	m2, _ := m.Update(key("e"))
+	m2, _ := studyingModel().Update(key("e"))
 	mm := m2.(Model)
-	if mm.curResult != study.TooEasy || mm.grades["a"] != study.TooEasy || !mm.curDone {
-		t.Fatalf("e should grade 太简单: result=%v grade=%v done=%v", mm.curResult, mm.grades["a"], mm.curDone)
+	if mm.curResult != study.TooEasy || !mm.curDone {
+		t.Fatalf("e should grade 太简单: result=%v done=%v", mm.curResult, mm.curDone)
 	}
 }
 
@@ -186,21 +180,20 @@ func TestRegradeAfterReveal(t *testing.T) {
 	// 认识 → 揭晓
 	m2, _ := m.Update(key("k"))
 	mm := m2.(Model)
-	if mm.curResult != study.Known || !mm.curDone || mm.graded != 1 {
-		t.Fatalf("initial: result=%v done=%v graded=%d", mm.curResult, mm.curDone, mm.graded)
+	if mm.curResult != study.Known || !mm.curDone {
+		t.Fatalf("initial: result=%v done=%v", mm.curResult, mm.curDone)
 	}
-	// 看完释义后改判为不认识:停留本卡,不重复计数
+	// 看完释义后改判为不认识:停留本卡(未前进、未出队)
 	m3, _ := mm.Update(key("f"))
 	mm = m3.(Model)
-	if mm.curResult != study.Unknown || mm.grades["a"] != study.Unknown {
-		t.Fatalf("re-grade should flip to Unknown: result=%v grade=%v", mm.curResult, mm.grades["a"])
+	if mm.curResult != study.Unknown || !mm.curDone || len(mm.cards) != 2 || mm.cards[0].ItemID != "a" {
+		t.Fatalf("re-grade 应停留本卡: result=%v cards0=%s", mm.curResult, mm.cards[0].ItemID)
 	}
-	if mm.idx != 0 || !mm.curDone || mm.graded != 1 {
-		t.Fatalf("re-grade must stay & not double-count: idx=%d done=%v graded=%d", mm.idx, mm.curDone, mm.graded)
-	}
-	// 空格进入下一词
-	if m4, _ := mm.Update(key(" ")); m4.(Model).idx != 1 {
-		t.Fatal("space should advance after re-grade")
+	// 下一词:不认识 → a 轮到队尾
+	m4, _ := mm.Update(key(" "))
+	mm = m4.(Model)
+	if len(mm.cards) != 2 || mm.cards[0].ItemID != "b" {
+		t.Fatalf("不认识应重排到队尾: cards0=%s len=%d", mm.cards[0].ItemID, len(mm.cards))
 	}
 }
 
@@ -213,13 +206,14 @@ func TestEnterAsKnownAndNext(t *testing.T) {
 	// 提问态:enter = 认识(揭晓,不前进)
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	mm := m2.(Model)
-	if mm.curResult != study.Known || !mm.curDone || mm.idx != 0 {
-		t.Fatalf("asking enter 应=认识+揭晓: result=%v done=%v idx=%d", mm.curResult, mm.curDone, mm.idx)
+	if mm.curResult != study.Known || !mm.curDone || len(mm.cards) != 2 {
+		t.Fatalf("asking enter 应=认识+揭晓: result=%v done=%v", mm.curResult, mm.curDone)
 	}
-	// 揭晓态:enter = 下一词(前进)
+	// 揭晓态:enter = 下一词(a 学会出队)
 	m3, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m3.(Model).idx != 1 {
-		t.Fatalf("revealed enter 应前进, idx=%d", m3.(Model).idx)
+	mm = m3.(Model)
+	if len(mm.cards) != 1 || mm.cards[0].ItemID != "b" || mm.grades["a"] != study.Known {
+		t.Fatalf("revealed enter 应前进: cards=%d grade_a=%v", len(mm.cards), mm.grades["a"])
 	}
 }
 
