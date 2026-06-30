@@ -23,6 +23,15 @@ const (
 
 const knownSchedule = 3 // api Nn.KNOWN
 
+// Grade is the user's judgment for a card.
+type Grade int
+
+const (
+	Unknown Grade = iota // 不认识
+	Known                // 认识(算完成,进入复习循环)
+	TooEasy              // 太简单 — 已掌握:schedule=KNOWN 且 failed_count=-1,不再学习/复习
+)
+
 // Card is one word presented for grading.
 type Card struct {
 	ItemID      string
@@ -113,26 +122,30 @@ func (s *Session) card(it api.SyncItem, typ Type) Card {
 }
 
 // BuildSubmit assembles the PUT body over the COMPLETE not-finished set.
-// known[itemID]==true means 认识 (→ *_items_known, schedule=KNOWN).
-func (s *Session) BuildSubmit(known map[string]bool, learningTime int) api.SubmitBody {
+// grades[itemID]: Known/TooEasy → *_items_known (schedule=KNOWN; TooEasy also
+// sets failed_count=-1 = mastered/不再学习); otherwise → *_items unchanged.
+func (s *Session) BuildSubmit(grades map[string]Grade, learningTime int) api.SubmitBody {
 	b := api.SubmitBody{
 		Date: s.Date, LearningTime: learningTime,
 		AItems: []api.SubmitItem{}, AItemsKnown: []api.SubmitItem{},
 		CItems: []api.SubmitItem{}, CItemsKnown: []api.SubmitItem{},
 	}
-	partition(s.AItems, known, &b.AItems, &b.AItemsKnown)
-	partition(s.CItems, known, &b.CItems, &b.CItemsKnown)
+	partition(s.AItems, grades, &b.AItems, &b.AItemsKnown)
+	partition(s.CItems, grades, &b.CItems, &b.CItemsKnown)
 	return b
 }
 
-func partition(items []api.SyncItem, known map[string]bool, unk, kn *[]api.SubmitItem) {
+func partition(items []api.SyncItem, grades map[string]Grade, unk, kn *[]api.SubmitItem) {
 	for _, it := range items {
-		si := api.SubmitItem{ItemID: it.ItemID, FailedCount: it.FailedCount, UpdatedAt: it.UpdatedAt}
-		if known[it.ItemID] {
+		si := api.SubmitItem{ItemID: it.ItemID, Schedule: it.Schedule, FailedCount: it.FailedCount, UpdatedAt: it.UpdatedAt}
+		switch grades[it.ItemID] {
+		case TooEasy:
+			si.Schedule, si.FailedCount = knownSchedule, -1
+			*kn = append(*kn, si)
+		case Known:
 			si.Schedule = knownSchedule
 			*kn = append(*kn, si)
-		} else {
-			si.Schedule = it.Schedule
+		default: // Unknown — stays in queue unchanged
 			*unk = append(*unk, si)
 		}
 	}

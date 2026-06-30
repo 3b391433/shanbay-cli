@@ -282,11 +282,11 @@ func runStudy(c *api.Client, args []string) error {
 		}
 
 		if turn == 1 {
-			fmt.Printf("词书《%s》。回车看释义,k=认识  f=不认识  q=结束并提交本组\n", book.Materialbook.Name)
+			fmt.Printf("词书《%s》。回车看释义,k=认识  f=不认识  e=太简单  q=结束并提交本组\n", book.Materialbook.Name)
 		}
 		fmt.Printf("\n—— 第 %d 组:%d 词(队列 新 %d / 复习 %d)——\n", turn, len(prompt), len(sess.AItems), len(sess.CItems))
 
-		known := map[string]bool{}
+		grades := map[string]study.Grade{}
 		quit := false
 		gradedThisTurn := 0
 		for i, card := range prompt {
@@ -302,7 +302,7 @@ func runStudy(c *api.Client, args []string) error {
 			for _, d := range card.Defs {
 				fmt.Println("       " + d)
 			}
-			fmt.Print("       k=认识  f=不认识  q=退出: ")
+			fmt.Print("       k=认识  f=不认识  e=太简单  q=退出: ")
 			if !sc.Scan() {
 				quit = true
 				break
@@ -311,7 +311,10 @@ func runStudy(c *api.Client, args []string) error {
 			case "q":
 				quit = true
 			case "k":
-				known[card.ItemID] = true
+				grades[card.ItemID] = study.Known
+				gradedThisTurn++
+			case "e":
+				grades[card.ItemID] = study.TooEasy
 				gradedThisTurn++
 			default:
 				gradedThisTurn++
@@ -331,7 +334,7 @@ func runStudy(c *api.Client, args []string) error {
 			break
 		}
 
-		body := sess.BuildSubmit(known, sess.LearningTime+int(time.Since(start).Seconds()))
+		body := sess.BuildSubmit(grades, sess.LearningTime+int(time.Since(start).Seconds()))
 		if *dry {
 			pretty, _ := json.MarshalIndent(body, "", "  ")
 			fmt.Println("\n--- DRY RUN: 第 1 组将提交的 body(未发送) ---")
@@ -341,9 +344,10 @@ func runStudy(c *api.Client, args []string) error {
 		if err := c.SubmitItems(mbid, body); err != nil {
 			return err
 		}
+		nk := len(body.AItemsKnown) + len(body.CItemsKnown)
 		totalGraded += gradedThisTurn
-		totalKnown += len(known)
-		fmt.Printf("  ✓ 第 %d 组已提交(认识 %d)\n", turn, len(known))
+		totalKnown += nk
+		fmt.Printf("  ✓ 第 %d 组已提交(认识/掌握 %d)\n", turn, nk)
 
 		if quit {
 			break

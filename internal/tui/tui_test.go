@@ -14,7 +14,7 @@ import (
 func studyingModel() Model {
 	return Model{
 		phase:    phaseStudying,
-		known:    map[string]bool{},
+		grades:   map[string]study.Grade{},
 		examples: map[string][]api.Example{},
 		turn:     1,
 		sess:     &study.Session{AItems: []api.SyncItem{{ItemID: "a"}, {ItemID: "b"}}},
@@ -30,28 +30,28 @@ func key(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []r
 func TestGradeRevealsThenAdvances(t *testing.T) {
 	m := studyingModel()
 
-	// grade card 0 as known -> reveals answer, does NOT advance
+	// 认识: reveals, does NOT advance
 	m2, _ := m.Update(key("k"))
 	mm := m2.(Model)
-	if !mm.curDone || !mm.curKnown || !mm.known["a"] {
-		t.Fatalf("k should grade+reveal: curDone=%v curKnown=%v known=%v", mm.curDone, mm.curKnown, mm.known["a"])
+	if !mm.curDone || mm.curResult != study.Known || mm.grades["a"] != study.Known {
+		t.Fatalf("k should grade 认识+reveal: curDone=%v result=%v grade=%v", mm.curDone, mm.curResult, mm.grades["a"])
 	}
 	if mm.idx != 0 {
 		t.Fatalf("grading must not advance yet, idx=%d", mm.idx)
 	}
 
-	// space advances to card 1
+	// space advances
 	m3, _ := mm.Update(key(" "))
 	mm = m3.(Model)
 	if mm.idx != 1 || mm.curDone {
 		t.Fatalf("space should advance: idx=%d curDone=%v", mm.idx, mm.curDone)
 	}
 
-	// grade card 1 as unknown, then advance -> end of turn -> submit
+	// 不认识 then advance past last card -> submit
 	m4, _ := mm.Update(key("f"))
 	mm = m4.(Model)
-	if !mm.curDone || mm.curKnown {
-		t.Fatalf("f should reveal as unknown: curDone=%v curKnown=%v", mm.curDone, mm.curKnown)
+	if mm.curResult != study.Unknown {
+		t.Fatalf("f should be 不认识, got %v", mm.curResult)
 	}
 	m5, cmd := mm.Update(key(" "))
 	mm = m5.(Model)
@@ -60,6 +60,15 @@ func TestGradeRevealsThenAdvances(t *testing.T) {
 	}
 	if mm.graded != 2 {
 		t.Fatalf("graded=%d, want 2", mm.graded)
+	}
+}
+
+func TestTooEasyGrade(t *testing.T) {
+	m := studyingModel()
+	m2, _ := m.Update(key("e"))
+	mm := m2.(Model)
+	if mm.curResult != study.TooEasy || mm.grades["a"] != study.TooEasy || !mm.curDone {
+		t.Fatalf("e should grade 太简单: result=%v grade=%v done=%v", mm.curResult, mm.grades["a"], mm.curDone)
 	}
 }
 
@@ -114,7 +123,8 @@ func TestStudyViewRenders(t *testing.T) {
 		t.Fatal("study view should show the current word")
 	}
 	// after grading, the answer (definition + examples) shows; markup is stripped
-	m.curDone = true
+	m.curDone, m.curResult = true, study.Known
+	m.grades["a"] = study.Known
 	m.examples["a"] = []api.Example{{ContentEN: "He <vocab>rolled</vocab> the ball.", ContentCN: "他把球滚走了。"}}
 	v := m.View()
 	if !strings.Contains(v, "第一") || !strings.Contains(v, "He rolled the ball.") || !strings.Contains(v, "他把球") {
@@ -138,7 +148,7 @@ func TestSnapshot(t *testing.T) {
 	}
 	m := studyingModel()
 	t.Logf("ASKING:\n%s", m.View())
-	m.curDone, m.curKnown = true, true
-	m.examples["a"] = []api.Example{{ContentEN: "He rolled the dice.", ContentCN: "他掷了骰子。"}}
-	t.Logf("REVEALED:\n%s", m.View())
+	m.curDone, m.curResult = true, study.TooEasy
+	m.examples["a"] = []api.Example{{ContentEN: "He <vocab>rolled</vocab> the dice.", ContentCN: "他掷了骰子。"}}
+	t.Logf("REVEALED(太简单):\n%s", m.View())
 }

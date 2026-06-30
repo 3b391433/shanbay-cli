@@ -1,6 +1,7 @@
 // Package tui is a bubbletea front-end for the study loop: one card at a time,
-// single-key grading, then it reveals the definition + examples before advancing,
-// auto-playing pronunciation. It loops through turns until the day's queue is done.
+// single-key grading (认识 / 不认识 / 太简单), then it reveals the definition +
+// examples before advancing, auto-playing pronunciation. It loops through turns
+// until the day's queue is done.
 package tui
 
 import (
@@ -46,18 +47,18 @@ type Config struct {
 type Model struct {
 	cfg Config
 
-	phase    phase
-	sess     *study.Session
-	cards    []study.Card
-	idx      int
-	graded   int             // graded in the current turn
-	curDone  bool            // current card graded → showing answer (def+examples)
-	curKnown bool            // the grade chosen for the current card
-	known    map[string]bool // known marks for the current turn
-	examples map[string][]api.Example
-	turn     int
-	prevSig  string
-	quitting bool
+	phase     phase
+	sess      *study.Session
+	cards     []study.Card
+	idx       int
+	graded    int // graded in the current turn
+	curDone   bool
+	curResult study.Grade
+	grades    map[string]study.Grade
+	examples  map[string][]api.Example
+	turn      int
+	prevSig   string
+	quitting  bool
 
 	totalGraded, totalKnown int
 	status                  *api.BookStatus
@@ -84,7 +85,7 @@ type errMsg struct{ err error }
 
 // New builds the initial model.
 func New(cfg Config) Model {
-	return Model{cfg: cfg, phase: phaseLoading, known: map[string]bool{}, examples: map[string][]api.Example{}}
+	return Model{cfg: cfg, phase: phaseLoading, grades: map[string]study.Grade{}, examples: map[string][]api.Example{}}
 }
 
 // Err returns a terminal error (e.g. auth failure) so the caller can re-login.
@@ -112,10 +113,10 @@ func (m Model) loadTurnCmd() tea.Cmd {
 }
 
 func (m Model) submitCmd() tea.Cmd {
-	cfg, sess, known := m.cfg, m.sess, m.known
-	graded, nk := m.graded, countTrue(m.known)
+	cfg, sess, grades := m.cfg, m.sess, m.grades
+	graded, nk := m.graded, learned(m.grades)
 	return func() tea.Msg {
-		body := sess.BuildSubmit(known, sess.LearningTime)
+		body := sess.BuildSubmit(grades, sess.LearningTime)
 		if err := cfg.Client.SubmitItems(cfg.MBID, body); err != nil {
 			return errMsg{err}
 		}
@@ -145,13 +146,13 @@ func (m Model) audioCmd() tea.Cmd {
 
 func (m Model) examplesCmd(id string) tea.Cmd {
 	if _, ok := m.examples[id]; ok || id == "" {
-		return nil // already loaded
+		return nil
 	}
 	client := m.cfg.Client
 	return func() tea.Msg {
 		ex, err := client.GetExamples(id)
 		if err != nil {
-			ex = nil // best-effort
+			ex = nil
 		}
 		return examplesLoadedMsg{id: id, examples: ex}
 	}
@@ -183,8 +184,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.sess, m.cards, m.idx = msg.sess, cards, 0
-		m.curDone, m.curKnown = false, false
-		m.known, m.graded, m.prevSig = map[string]bool{}, 0, msg.sig
+		m.curDone, m.curResult = false, study.Unknown
+		m.grades, m.graded, m.prevSig = map[string]study.Grade{}, 0, msg.sig
 		m.turn++
 		m.phase = phaseStudying
 		return m, m.onCardShown()
@@ -234,21 +235,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if !m.curDone {
-		// asking: grade the card, then show the answer
 		switch msg.String() {
-		case "k":
-			m.known[m.cards[m.idx].ItemID] = true
-			m.curKnown = true
-			m.curDone = true
-			m.graded++
-		case "f", "j":
-			m.curDone = true
-			m.graded++
+		case "k": // 认识
+			m.grade(study.Known)
+		case "f", "j": // 不认识
+			m.grade(study.Unknown)
+		case "e": // 太简单(已掌握)
+			m.grade(study.TooEasy)
 		}
 		return m, nil
 	}
 
-	// answer shown: advance on space/enter/n/→
 	switch msg.String() {
 	case " ", "space", "enter", "n", "right":
 		return m.advance()
@@ -256,9 +253,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// grade records the judgment for the current card (mutates the receiver copy's
+// maps, which are shared by reference — the bubbletea idiom).
+func (m *Model) grade(g study.Grade) {
+	m.grades[m.cards[m.idx].ItemID] = g
+	m.curResult = g
+	m.curDone = true
+	m.graded++
+}
+
 func (m Model) advance() (tea.Model, tea.Cmd) {
 	m.idx++
-	m.curDone, m.curKnown = false, false
+	m.curDone, m.curResult = false, study.Unknown
 	if m.idx >= len(m.cards) {
 		m.phase = phaseSubmitting
 		return m, m.submitCmd()
@@ -314,13 +320,8 @@ func (m Model) studyView() string {
 		b.WriteString(ipaStyle.Render("/" + card.IPAUS + "/"))
 	}
 	if m.curDone {
-		if m.curKnown {
-			b.WriteString("   ")
-			b.WriteString(okStyle.Render("✓ 认识"))
-		} else {
-			b.WriteString("   ")
-			b.WriteString(errStyle.Render("✗ 不认识"))
-		}
+		b.WriteString("   ")
+		b.WriteString(resultLabel(m.curResult))
 	}
 	b.WriteString("\n")
 
@@ -340,11 +341,22 @@ func (m Model) studyView() string {
 		b.WriteString(m.examplesBlock(card.ItemID))
 	}
 
-	help := "k 认识    f 不认识    p 发音    q 退出"
+	help := "k 认识    f 不认识    e 太简单    p 发音    q 退出"
 	if m.curDone {
 		help = "↵/空格 下一个    p 发音    q 退出并保存"
 	}
 	return "\n" + dimStyle.Render(header) + "\n" + cardStyle.Render(b.String()) + "\n" + helpStyle.Render(help) + "\n"
+}
+
+func resultLabel(g study.Grade) string {
+	switch g {
+	case study.Known:
+		return okStyle.Render("✓ 认识")
+	case study.TooEasy:
+		return okStyle.Render("⏭ 太简单·已掌握(不再学习)")
+	default:
+		return errStyle.Render("✗ 不认识")
+	}
 }
 
 func (m Model) examplesBlock(id string) string {
@@ -380,7 +392,7 @@ func (m Model) doneView() string {
 		b.WriteString("\n")
 	}
 	if m.totalGraded > 0 {
-		b.WriteString(okStyle.Render(fmt.Sprintf("本次共评分 %d 词(认识 %d)。", m.totalGraded, m.totalKnown)))
+		b.WriteString(okStyle.Render(fmt.Sprintf("本次共评分 %d 词(认识/掌握 %d)。", m.totalGraded, m.totalKnown)))
 		b.WriteString("\n")
 	}
 	if m.status != nil {
@@ -403,10 +415,11 @@ func sigOf(s *study.Session) string {
 	return strings.Join(ids, ",")
 }
 
-func countTrue(m map[string]bool) int {
+// learned counts cards judged 认识 or 太简单 (both leave the queue as known).
+func learned(grades map[string]study.Grade) int {
 	n := 0
-	for _, v := range m {
-		if v {
+	for _, g := range grades {
+		if g == study.Known || g == study.TooEasy {
 			n++
 		}
 	}
