@@ -255,19 +255,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if !m.curDone {
-		switch msg.String() {
-		case "k": // 认识
-			m.grade(study.Known)
-		case "f", "j": // 不认识
-			m.grade(study.Unknown)
-		case "e": // 太简单(已掌握)
-			m.grade(study.TooEasy)
-		default:
-			return m, nil
+		if g, ok := gradeForKey(msg.String()); ok {
+			m.grade(g)
+			return m, m.exampleAudioCmd() // 揭晓后自动朗读例句
 		}
-		return m, m.exampleAudioCmd() // 揭晓后自动朗读例句
+		return m, nil
 	}
 
+	// 答案已揭晓:k/f/e 可改判(停留在本词),空格/回车进入下一词
+	if g, ok := gradeForKey(msg.String()); ok {
+		m.setGrade(g)
+		return m, nil
+	}
 	switch msg.String() {
 	case " ", "space", "enter", "n", "right":
 		return m.advance()
@@ -275,11 +274,28 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// grade records the judgment for the current card (mutates the receiver copy's
-// maps, which are shared by reference — the bubbletea idiom).
-func (m *Model) grade(g study.Grade) {
+func gradeForKey(s string) (study.Grade, bool) {
+	switch s {
+	case "k":
+		return study.Known, true
+	case "f", "j":
+		return study.Unknown, true
+	case "e":
+		return study.TooEasy, true
+	}
+	return 0, false
+}
+
+// setGrade records/updates the judgment for the current card (also used to
+// re-grade after the answer is revealed). grades is shared by reference.
+func (m *Model) setGrade(g study.Grade) {
 	m.grades[m.cards[m.idx].ItemID] = g
 	m.curResult = g
+}
+
+// grade is the first judgment on a card: it reveals the answer and counts it.
+func (m *Model) grade(g study.Grade) {
+	m.setGrade(g)
 	m.curDone = true
 	m.graded++
 }
@@ -373,7 +389,7 @@ func (m Model) studyView() string {
 
 	help := "k 认识    f 不认识    e 太简单    p 发音    q 退出"
 	if m.curDone {
-		help = "↵/空格 下一个    p 发音    q 退出并保存"
+		help = "↵/空格 下一词    k/f/e 改判    p 发音    q 退出"
 	}
 	return "\n" + m.bookTitle() + dimStyle.Render(header) + "\n" + cardStyle.Render(b.String()) + "\n" + helpStyle.Render(help) + "\n"
 }

@@ -145,6 +145,29 @@ func TestCleanStripsTags(t *testing.T) {
 	}
 }
 
+func TestRegradeAfterReveal(t *testing.T) {
+	m := studyingModel()
+	// 认识 → 揭晓
+	m2, _ := m.Update(key("k"))
+	mm := m2.(Model)
+	if mm.curResult != study.Known || !mm.curDone || mm.graded != 1 {
+		t.Fatalf("initial: result=%v done=%v graded=%d", mm.curResult, mm.curDone, mm.graded)
+	}
+	// 看完释义后改判为不认识:停留本卡,不重复计数
+	m3, _ := mm.Update(key("f"))
+	mm = m3.(Model)
+	if mm.curResult != study.Unknown || mm.grades["a"] != study.Unknown {
+		t.Fatalf("re-grade should flip to Unknown: result=%v grade=%v", mm.curResult, mm.grades["a"])
+	}
+	if mm.idx != 0 || !mm.curDone || mm.graded != 1 {
+		t.Fatalf("re-grade must stay & not double-count: idx=%d done=%v graded=%d", mm.idx, mm.curDone, mm.graded)
+	}
+	// 空格进入下一词
+	if m4, _ := mm.Update(key(" ")); m4.(Model).idx != 1 {
+		t.Fatal("space should advance after re-grade")
+	}
+}
+
 // TestSnapshot prints the rendered views; run with SNAP=1 to eyeball layout.
 func TestSnapshot(t *testing.T) {
 	if os.Getenv("SNAP") == "" {
