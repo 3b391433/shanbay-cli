@@ -295,7 +295,7 @@ func runStudy(c *api.Client, args []string) error {
 		}
 
 		if turn == 1 {
-			fmt.Printf("词书《%s》。回车看释义,k=认识  f=不认识  e=太简单  q=结束并提交本组\n", book.Materialbook.Name)
+			fmt.Printf("词书《%s》。回车看释义,1=认识 2=不认识 3=太简单 q=结束并提交\n", book.Materialbook.Name)
 		}
 		fmt.Printf("\n—— 第 %d 组:%d 词(队列 新 %d / 复习 %d)——\n", turn, len(prompt), len(sess.AItems), len(sess.CItems))
 
@@ -315,7 +315,7 @@ func runStudy(c *api.Client, args []string) error {
 			for _, d := range card.Defs {
 				fmt.Println("       " + d)
 			}
-			fmt.Print("       k=认识  f=不认识  e=太简单  q=退出: ")
+			fmt.Print("       1=认识 2=不认识 3=太简单 q=退出: ")
 			if !sc.Scan() {
 				quit = true
 				break
@@ -323,13 +323,13 @@ func runStudy(c *api.Client, args []string) error {
 			switch strings.ToLower(strings.TrimSpace(sc.Text())) {
 			case "q":
 				quit = true
-			case "k":
+			case "1", "k":
 				grades[card.ItemID] = study.Known
 				gradedThisTurn++
-			case "e":
+			case "3", "e":
 				grades[card.ItemID] = study.TooEasy
 				gradedThisTurn++
-			default:
+			default: // 2 / f / 其它 = 不认识
 				gradedThisTurn++
 			}
 			if quit {

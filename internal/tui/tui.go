@@ -266,13 +266,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	if m.phase != phaseStudying {
-		if msg.String() == "q" {
+		if s := msg.String(); s == "q" || s == "esc" {
 			return m, tea.Quit
 		}
 		return m, nil
 	}
 	switch msg.String() {
-	case "q":
+	case "q", "esc":
 		m.quitting = true
 		if m.graded == 0 {
 			m.phase = phaseDone
@@ -280,7 +280,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.phase = phaseSubmitting
 		return m, m.submitCmd()
-	case "p":
+	case "p", "0":
 		if m.curDone {
 			return m, m.exampleAudioCmd()
 		}
@@ -307,13 +307,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// gradeForKey maps a key to a grade. Number keys 1/2/3 are provided because a
+// Chinese IME swallows letter keys (f/k/e) into pinyin composition; digits,
+// arrows, space and esc pass through untouched.
 func gradeForKey(s string) (study.Grade, bool) {
 	switch s {
-	case "k":
+	case "1", "k":
 		return study.Known, true
-	case "f", "j":
+	case "2", "f", "j":
 		return study.Unknown, true
-	case "e":
+	case "3", "e":
 		return study.TooEasy, true
 	}
 	return 0, false
@@ -421,9 +424,9 @@ func (m Model) studyView() string {
 		b.WriteString(m.examplesBlock(card.ItemID))
 	}
 
-	help := "k 认识    f 不认识    e 太简单    p 发音    q 退出"
+	help := "1 认识   2 不认识   3 太简单   0 发音   esc 退出"
 	if m.curDone {
-		help = "↵/空格 下一词    k/f/e 改判    p 发音    q 退出"
+		help = "空格 下一词   1/2/3 改判   0 发音   esc 退出"
 	}
 	return "\n" + m.bookTitle() + dimStyle.Render(header) + "\n" + cardStyle.Render(b.String()) + "\n" + helpStyle.Render(help) + "\n"
 }

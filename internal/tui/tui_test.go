@@ -78,6 +78,25 @@ func TestTooEasyGrade(t *testing.T) {
 	}
 }
 
+func TestNumberKeysGrade(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		want study.Grade
+	}{{"1", study.Known}, {"2", study.Unknown}, {"3", study.TooEasy}} {
+		m2, _ := studyingModel().Update(key(tc.key))
+		if got := m2.(Model).curResult; got != tc.want || !m2.(Model).curDone {
+			t.Fatalf("key %q → %v (done=%v), want %v", tc.key, got, m2.(Model).curDone, tc.want)
+		}
+	}
+}
+
+func TestEscQuits(t *testing.T) {
+	_, cmd := studyingModel().Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("esc should quit")
+	}
+}
+
 func TestQuitWithProgressSubmits(t *testing.T) {
 	m := studyingModel()
 	m2, _ := m.Update(key("k"))
