@@ -36,6 +36,7 @@ import (
 	"github.com/3b391433/shanbay-cli/internal/api"
 	"github.com/3b391433/shanbay-cli/internal/audio"
 	"github.com/3b391433/shanbay-cli/internal/auth"
+	"github.com/3b391433/shanbay-cli/internal/keymap"
 	"github.com/3b391433/shanbay-cli/internal/study"
 	"github.com/3b391433/shanbay-cli/internal/tui"
 )
@@ -227,6 +228,7 @@ func runStudy(c *api.Client, args []string) error {
 	review := !*newOnly
 	mixed := *order != "new-first"
 	useAudio := !*mute
+	keys := keymap.Load()
 	if useAudio && !audio.Available() {
 		fmt.Fprintln(os.Stderr, "提示:未找到音频播放器,发音不可用(可 sudo apt install mpg123)。")
 	}
@@ -243,7 +245,7 @@ func runStudy(c *api.Client, args []string) error {
 		prog := tea.NewProgram(tui.New(tui.Config{
 			Client: c, MBID: mbid, BookName: book.Materialbook.Name,
 			Review: review, Audio: useAudio, Limit: *limit,
-			Group: *group, Mixed: mixed,
+			Group: *group, Mixed: mixed, Keys: keys,
 		}))
 		fm, err := prog.Run()
 		if err != nil {
@@ -320,16 +322,17 @@ func runStudy(c *api.Client, args []string) error {
 				quit = true
 				break
 			}
-			switch strings.ToLower(strings.TrimSpace(sc.Text())) {
-			case "q":
+			ans := strings.ToLower(strings.TrimSpace(sc.Text()))
+			switch {
+			case keymap.Has(keys.Quit, ans):
 				quit = true
-			case "1", "k":
+			case keymap.Has(keys.Known, ans):
 				grades[card.ItemID] = study.Known
 				gradedThisTurn++
-			case "3", "e":
+			case keymap.Has(keys.TooEasy, ans):
 				grades[card.ItemID] = study.TooEasy
 				gradedThisTurn++
-			default: // 2 / f / 其它 = 不认识
+			default: // keys.Unknown 或其它输入 = 不认识
 				gradedThisTurn++
 			}
 			if quit {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/3b391433/shanbay-cli/internal/api"
 	"github.com/3b391433/shanbay-cli/internal/audio"
+	"github.com/3b391433/shanbay-cli/internal/keymap"
 	"github.com/3b391433/shanbay-cli/internal/study"
 )
 
@@ -68,9 +69,10 @@ type Config struct {
 	BookName string
 	Review   bool
 	Audio    bool
-	Limit    int  // 本次总上限(0=不限)
-	Group    int  // 每组单词数(0=整队列)
-	Mixed    bool // 新词与复习混合穿插
+	Limit    int           // 本次总上限(0=不限)
+	Group    int           // 每组单词数(0=整队列)
+	Mixed    bool          // 新词与复习混合穿插
+	Keys     keymap.Keymap // 按键绑定
 }
 
 // Model is the bubbletea model (exported so callers can read Err after Run).
@@ -115,6 +117,9 @@ type errMsg struct{ err error }
 
 // New builds the initial model.
 func New(cfg Config) Model {
+	if cfg.Keys.Empty() {
+		cfg.Keys = keymap.Default()
+	}
 	return Model{cfg: cfg, phase: phaseLoading, grades: map[string]study.Grade{}, examples: map[string][]api.Example{}}
 }
 
@@ -265,14 +270,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		return m, tea.Quit
 	}
+	s := msg.String()
+	k := m.cfg.Keys
+
 	if m.phase != phaseStudying {
-		if s := msg.String(); s == "q" || s == "esc" {
+		if keymap.Has(k.Quit, s) {
 			return m, tea.Quit
 		}
 		return m, nil
 	}
-	switch msg.String() {
-	case "q", "esc":
+
+	switch {
+	case keymap.Has(k.Quit, s):
 		m.quitting = true
 		if m.graded == 0 {
 			m.phase = phaseDone
@@ -280,7 +289,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.phase = phaseSubmitting
 		return m, m.submitCmd()
-	case "p", "0":
+	case keymap.Has(k.Audio, s):
 		if m.curDone {
 			return m, m.exampleAudioCmd()
 		}
@@ -288,35 +297,33 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if !m.curDone {
-		if g, ok := gradeForKey(msg.String()); ok {
+		if g, ok := m.gradeForKey(s); ok {
 			m.grade(g)
 			return m, m.exampleAudioCmd() // 揭晓后自动朗读例句
 		}
 		return m, nil
 	}
 
-	// 答案已揭晓:k/f/e 可改判(停留在本词),空格/回车进入下一词
-	if g, ok := gradeForKey(msg.String()); ok {
+	// 揭晓后:next 优先于改判(同一键如 enter 可既作"认识"又作"下一词")
+	if keymap.Has(k.Next, s) {
+		return m.advance()
+	}
+	if g, ok := m.gradeForKey(s); ok {
 		m.setGrade(g)
 		return m, nil
-	}
-	switch msg.String() {
-	case " ", "space", "enter", "n", "right":
-		return m.advance()
 	}
 	return m, nil
 }
 
-// gradeForKey maps a key to a grade. Number keys 1/2/3 are provided because a
-// Chinese IME swallows letter keys (f/k/e) into pinyin composition; digits,
-// arrows, space and esc pass through untouched.
-func gradeForKey(s string) (study.Grade, bool) {
-	switch s {
-	case "1", "k":
+// gradeForKey maps a key to a grade via the configured bindings.
+func (m Model) gradeForKey(s string) (study.Grade, bool) {
+	k := m.cfg.Keys
+	switch {
+	case keymap.Has(k.Known, s):
 		return study.Known, true
-	case "2", "f", "j":
+	case keymap.Has(k.Unknown, s):
 		return study.Unknown, true
-	case "3", "e":
+	case keymap.Has(k.TooEasy, s):
 		return study.TooEasy, true
 	}
 	return 0, false
@@ -424,9 +431,12 @@ func (m Model) studyView() string {
 		b.WriteString(m.examplesBlock(card.ItemID))
 	}
 
-	help := "1 认识   2 不认识   3 太简单   0 发音   esc 退出"
+	k := m.cfg.Keys
+	help := fmt.Sprintf("%s 认识   %s 不认识   %s 太简单   %s 发音   %s 退出",
+		keymap.First(k.Known), keymap.First(k.Unknown), keymap.First(k.TooEasy), keymap.First(k.Audio), keymap.First(k.Quit))
 	if m.curDone {
-		help = "空格 下一词   1/2/3 改判   0 发音   esc 退出"
+		help = fmt.Sprintf("%s 下一词   %s/%s/%s 改判   %s 发音   %s 退出",
+			keymap.First(k.Next), keymap.First(k.Known), keymap.First(k.Unknown), keymap.First(k.TooEasy), keymap.First(k.Audio), keymap.First(k.Quit))
 	}
 	return "\n" + m.bookTitle() + dimStyle.Render(header) + "\n" + cardStyle.Render(b.String()) + "\n" + helpStyle.Render(help) + "\n"
 }

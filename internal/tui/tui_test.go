@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/3b391433/shanbay-cli/internal/api"
+	"github.com/3b391433/shanbay-cli/internal/keymap"
 	"github.com/3b391433/shanbay-cli/internal/study"
 )
 
@@ -18,7 +19,7 @@ func noANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
 func studyingModel() Model {
 	return Model{
-		cfg:      Config{BookName: "日常生活汇总单词"},
+		cfg:      Config{BookName: "日常生活汇总单词", Keys: keymap.Default()},
 		phase:    phaseStudying,
 		grades:   map[string]study.Grade{},
 		examples: map[string][]api.Example{},
@@ -200,6 +201,25 @@ func TestRegradeAfterReveal(t *testing.T) {
 	// 空格进入下一词
 	if m4, _ := mm.Update(key(" ")); m4.(Model).idx != 1 {
 		t.Fatal("space should advance after re-grade")
+	}
+}
+
+func TestEnterAsKnownAndNext(t *testing.T) {
+	m := studyingModel()
+	m.cfg.Keys = keymap.Keymap{
+		Known: []string{"enter"}, Unknown: []string{"2"}, TooEasy: []string{"3"},
+		Next: []string{"enter"}, Audio: []string{"0"}, Quit: []string{"esc"},
+	}
+	// 提问态:enter = 认识(揭晓,不前进)
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm := m2.(Model)
+	if mm.curResult != study.Known || !mm.curDone || mm.idx != 0 {
+		t.Fatalf("asking enter 应=认识+揭晓: result=%v done=%v idx=%d", mm.curResult, mm.curDone, mm.idx)
+	}
+	// 揭晓态:enter = 下一词(前进)
+	m3, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m3.(Model).idx != 1 {
+		t.Fatalf("revealed enter 应前进, idx=%d", m3.(Model).idx)
 	}
 }
 
