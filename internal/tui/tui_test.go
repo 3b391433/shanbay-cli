@@ -13,6 +13,7 @@ import (
 
 func studyingModel() Model {
 	return Model{
+		cfg:      Config{BookName: "日常生活汇总单词"},
 		phase:    phaseStudying,
 		grades:   map[string]study.Grade{},
 		examples: map[string][]api.Example{},
@@ -121,6 +122,9 @@ func TestStudyViewRenders(t *testing.T) {
 	m := studyingModel()
 	if !strings.Contains(m.View(), "alpha") {
 		t.Fatal("study view should show the current word")
+	}
+	if !strings.Contains(m.View(), "日常生活汇总单词") {
+		t.Fatal("study view should show the current word book name")
 	}
 	// after grading, the answer (definition + examples) shows; markup is stripped
 	m.curDone, m.curResult = true, study.Known

@@ -308,7 +308,15 @@ var (
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	okStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	bookStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 )
+
+func (m Model) bookTitle() string {
+	if m.cfg.BookName == "" {
+		return ""
+	}
+	return bookStyle.Render("《"+m.cfg.BookName+"》") + "\n"
+}
 
 func (m Model) View() string {
 	switch m.phase {
@@ -367,7 +375,7 @@ func (m Model) studyView() string {
 	if m.curDone {
 		help = "↵/空格 下一个    p 发音    q 退出并保存"
 	}
-	return "\n" + dimStyle.Render(header) + "\n" + cardStyle.Render(b.String()) + "\n" + helpStyle.Render(help) + "\n"
+	return "\n" + m.bookTitle() + dimStyle.Render(header) + "\n" + cardStyle.Render(b.String()) + "\n" + helpStyle.Render(help) + "\n"
 }
 
 func resultLabel(g study.Grade) string {
@@ -409,6 +417,7 @@ func (m Model) examplesBlock(id string) string {
 func (m Model) doneView() string {
 	var b strings.Builder
 	b.WriteString("\n")
+	b.WriteString(m.bookTitle())
 	if m.doneMsg != "" {
 		b.WriteString(m.doneMsg)
 		b.WriteString("\n")
