@@ -65,7 +65,11 @@ func fetch(url string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, fmt.Sprintf("%x.mp3", sha1.Sum([]byte(url))))
+	ext := filepath.Ext(url)
+	if ext == "" || len(ext) > 5 {
+		ext = ".mp3"
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%x%s", sha1.Sum([]byte(url)), ext))
 	if _, err := os.Stat(path); err == nil {
 		cache[url] = path
 		return path, nil

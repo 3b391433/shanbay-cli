@@ -144,6 +144,19 @@ func (m Model) audioCmd() tea.Cmd {
 	return func() tea.Msg { _ = audio.Play(url); return nil }
 }
 
+// exampleAudioCmd plays the current card's first example sentence audio.
+func (m Model) exampleAudioCmd() tea.Cmd {
+	if !m.cfg.Audio || m.idx >= len(m.cards) {
+		return nil
+	}
+	for _, e := range m.examples[m.cards[m.idx].ItemID] {
+		if u := e.AudioURL(); u != "" {
+			return func() tea.Msg { _ = audio.Play(u); return nil }
+		}
+	}
+	return nil
+}
+
 func (m Model) examplesCmd(id string) tea.Cmd {
 	if _, ok := m.examples[id]; ok || id == "" {
 		return nil
@@ -194,6 +207,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.examples = []api.Example{}
 		}
 		m.examples[msg.id] = msg.examples
+		// if this card's answer is already showing, play its example now
+		if m.curDone && m.idx < len(m.cards) && m.cards[m.idx].ItemID == msg.id {
+			return m, m.exampleAudioCmd()
+		}
 		return m, nil
 	case submittedMsg:
 		m.totalGraded += msg.graded
@@ -231,6 +248,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.phase = phaseSubmitting
 		return m, m.submitCmd()
 	case "p":
+		if m.curDone {
+			return m, m.exampleAudioCmd()
+		}
 		return m, m.audioCmd()
 	}
 
@@ -242,8 +262,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.grade(study.Unknown)
 		case "e": // 太简单(已掌握)
 			m.grade(study.TooEasy)
+		default:
+			return m, nil
 		}
-		return m, nil
+		return m, m.exampleAudioCmd() // 揭晓后自动朗读例句
 	}
 
 	switch msg.String() {
