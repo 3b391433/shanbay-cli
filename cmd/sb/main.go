@@ -5,6 +5,7 @@
 //	sb status                 账号 / 当前词书 / 今日进度
 //	sb lookup <word>          查词
 //	sb goal [N]               查看/设置每日新词目标
+//	sb checkin                手动打卡(完成今日任务后;显示累计天数)
 //	sb study [flags]          背单词
 //	    --new-only            只背新词(默认含复习)
 //	    --order mixed|new-first  排列方式(默认 mixed 混合)
@@ -12,7 +13,11 @@
 //	    --limit N             本次最多 N 个(0=直到清空)
 //	    --mute                关闭发音(默认开)
 //	    --plain               简易行模式(非 TUI)
-//	    --dry-run             只打印将提交的 body,不发送
+//	    --no-checkin          背完后不自动打卡(默认完成即打卡)
+//	    --dry-run             只打印将提交的 body,不发送(也不打卡)
+//
+// 背完当日任务后会自动打卡(等同网页「去打卡」);服务端按完成状态门控,未完成或
+// 已打卡则静默跳过。--no-checkin 关闭自动打卡,--dry-run 也不打卡。
 //
 // Login state is checked at startup: a missing or expired cookie triggers an
 // interactive paste-a-curl login. A 401/403 mid-command also triggers re-login
@@ -68,10 +73,12 @@ func main() {
 			return runLookup(client, cmdArgs[0])
 		case "goal":
 			return runGoal(client, cmdArgs)
+		case "checkin":
+			return runCheckin(client)
 		case "study":
 			return runStudy(client, cmdArgs)
 		default:
-			return fmt.Errorf("未知命令: %s(可用: study/status/lookup/goal/login)", cmd)
+			return fmt.Errorf("未知命令: %s(可用: study/status/lookup/goal/checkin/login)", cmd)
 		}
 	}
 
@@ -214,6 +221,41 @@ func runGoal(c *api.Client, args []string) error {
 	return nil
 }
 
+// runCheckin performs today's check-in on demand (`sb checkin`), reporting
+// whether it just checked in, was already done, or isn't eligible yet.
+func runCheckin(c *api.Client) error {
+	state, just, err := study.Checkin(c)
+	if err != nil {
+		return err
+	}
+	switch {
+	case just:
+		fmt.Printf("✅ 打卡成功,累计 %d 天。\n", state.CheckinDays)
+	case state.Done():
+		fmt.Printf("今日已打卡,累计 %d 天。\n", state.CheckinDays)
+	default:
+		fmt.Println("今日还不能打卡 —— 先完成今日单词任务(sb study)。")
+	}
+	return nil
+}
+
+// reportCheckin runs the auto-checkin after a study session and prints a short
+// line. It never fails the command: studying already succeeded, so a checkin
+// error is reported to stderr and swallowed. Not-yet-eligible stays silent.
+func reportCheckin(c *api.Client) {
+	state, just, err := study.Checkin(c)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "(打卡跳过:%v)\n", err)
+		return
+	}
+	switch {
+	case just:
+		fmt.Printf("✅ 已自动打卡,累计 %d 天。\n", state.CheckinDays)
+	case state.Done():
+		fmt.Printf("今日已打卡,累计 %d 天。\n", state.CheckinDays)
+	}
+}
+
 func runStudy(c *api.Client, args []string) error {
 	fs := flag.NewFlagSet("study", flag.ExitOnError)
 	newOnly := fs.Bool("new-only", false, "只背新词(默认含复习)")
@@ -223,6 +265,7 @@ func runStudy(c *api.Client, args []string) error {
 	dry := fs.Bool("dry-run", false, "只打印将提交的 body,不发送")
 	mute := fs.Bool("mute", false, "关闭发音(默认开)")
 	plain := fs.Bool("plain", false, "用简易行模式代替 TUI")
+	noCheckin := fs.Bool("no-checkin", false, "背完后不自动打卡(默认完成即打卡)")
 	_ = fs.Parse(args)
 
 	review := !*newOnly
@@ -246,6 +289,7 @@ func runStudy(c *api.Client, args []string) error {
 			Client: c, MBID: mbid, BookName: book.Materialbook.Name,
 			Review: review, Audio: useAudio, Limit: *limit,
 			Group: *group, Mixed: mixed, Keys: keys,
+			Checkin: !*noCheckin,
 		}))
 		fm, err := prog.Run()
 		if err != nil {
@@ -403,6 +447,9 @@ func runStudy(c *api.Client, args []string) error {
 			fmt.Printf("当前进度:新词 %d/%d,复习 %d/%d,剩余 %d\n",
 				st.AFinishedCount, st.ACount, st.CFinishedCount, st.CCount, st.RemainingCount)
 		}
+	}
+	if !*noCheckin {
+		reportCheckin(c) // 完成今日任务则自动打卡(未完成/已打卡静默跳过)
 	}
 	return nil
 }

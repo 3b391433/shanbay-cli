@@ -56,7 +56,8 @@ const (
 	phaseLoading phase = iota
 	phaseStudying
 	phaseSubmitting
-	phaseMore // 本轮完成,询问是否「再来一组」
+	phaseMore    // 本轮完成,询问是否「再来一组」
+	phaseCheckin // 今日完成,正在自动打卡
 	phaseDone
 	phaseError
 )
@@ -72,6 +73,7 @@ type Config struct {
 	Group    int           // 每组单词数(0=整队列)
 	Mixed    bool          // 新词与复习混合穿插
 	Keys     keymap.Keymap // 按键绑定
+	Checkin  bool          // 完成今日任务后自动打卡(等同网页「去打卡」)
 }
 
 // Model is the bubbletea model (exported so callers can read Err after Run).
@@ -97,6 +99,11 @@ type Model struct {
 	status     *api.BookStatus
 	doneMsg    string
 	err        error
+
+	checkinTried bool         // 已尝试过自动打卡(每次会话仅一次)
+	checkin      *api.Checkin // 打卡后的状态(nil=未打卡)
+	checkinJust  bool         // 本次刚打的卡(区分「已打过」)
+	checkinErr   error        // 打卡出错(非致命,仅提示)
 }
 
 // messages
@@ -114,6 +121,11 @@ type submittedMsg struct {
 type examplesLoadedMsg struct {
 	id       string
 	examples []api.Example
+}
+type checkinResultMsg struct {
+	state *api.Checkin
+	just  bool
+	err   error
 }
 type errMsg struct{ err error }
 
@@ -172,6 +184,29 @@ func (m Model) nextTurnCmd() tea.Cmd {
 	}
 }
 
+// checkinCmd performs the daily check-in (no-op if not eligible / already done).
+func (m Model) checkinCmd() tea.Cmd {
+	client := m.cfg.Client
+	return func() tea.Msg {
+		state, just, err := study.Checkin(client)
+		return checkinResultMsg{state: state, just: just, err: err}
+	}
+}
+
+// finish ends the session. With auto-checkin on it first runs one check-in
+// (phaseCheckin, then quits on checkinResultMsg); otherwise it quits straight
+// away. Reaching here means the day's task is done or the user is leaving — the
+// check-in itself is gated server-side, so it's a no-op unless truly eligible.
+func (m Model) finish() (tea.Model, tea.Cmd) {
+	if m.cfg.Checkin && !m.checkinTried {
+		m.checkinTried = true
+		m.phase = phaseCheckin
+		return m, m.checkinCmd()
+	}
+	m.phase = phaseDone
+	return m, tea.Quit
+}
+
 // onCardShown plays pronunciation and prefetches examples for the current card.
 func (m Model) onCardShown() tea.Cmd {
 	if len(m.cards) == 0 {
@@ -225,13 +260,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.phase = phaseMore // 可「再来一组」,等用户选择
 			return m, nil
 		}
-		m.phase = phaseDone
 		if msg.first {
 			m.doneMsg = "队列为空 — 今天没有待学/待复习的词(或已全部完成)。"
 		} else {
 			m.doneMsg = "🎉 今日队列已清空。"
 		}
-		return m, tea.Quit
+		return m.finish()
 	case reloadMsg:
 		m.phase = phaseLoading
 		m.prevSig = "" // 新一组,允许重新加载
@@ -244,8 +278,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cfg.Limit > 0 {
 			rem := m.cfg.Limit - m.totalKnown
 			if rem <= 0 {
-				m.phase, m.doneMsg = phaseDone, "已达本次上限。"
-				return m, tea.Quit
+				m.doneMsg = "已达本次上限。"
+				return m.finish()
 			}
 			if rem < len(cards) {
 				cards = cards[:rem]
@@ -271,11 +305,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.totalKnown += msg.learned
 		m.status = msg.status
 		if m.quitting {
-			m.phase = phaseDone
-			return m, tea.Quit
+			return m.finish()
 		}
 		m.phase = phaseLoading
 		return m, m.loadTurnCmd()
+	case checkinResultMsg:
+		m.checkin, m.checkinJust, m.checkinErr = msg.state, msg.just, msg.err
+		m.phase = phaseDone
+		return m, tea.Quit
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -292,8 +329,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.phase == phaseMore {
 		switch {
 		case keymap.Has(k.Quit, s):
-			m.phase = phaseDone
-			return m, tea.Quit
+			return m.finish()
 		case keymap.Has(k.Next, s):
 			m.phase = phaseLoading
 			return m, m.nextTurnCmd() // 再来一组
@@ -315,8 +351,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.grades[m.cards[0].ItemID] = m.curResult
 		}
 		if !m.touched {
-			m.phase = phaseDone
-			return m, tea.Quit
+			return m.finish()
 		}
 		m.phase = phaseSubmitting
 		return m, m.submitCmd()
@@ -423,6 +458,8 @@ func (m Model) View() string {
 		return "\n  加载中…\n"
 	case phaseSubmitting:
 		return "\n  提交中…\n"
+	case phaseCheckin:
+		return "\n  打卡中…\n"
 	case phaseMore:
 		return m.moreView()
 	case phaseError:
@@ -560,7 +597,23 @@ func (m Model) doneView() string {
 			m.status.AFinishedCount, m.status.ACount, m.status.CFinishedCount, m.status.CCount, m.status.RemainingCount)))
 		b.WriteString("\n")
 	}
+	b.WriteString(m.checkinLine())
 	return b.String()
+}
+
+// checkinLine renders the auto-checkin outcome (empty when off / not eligible).
+func (m Model) checkinLine() string {
+	switch {
+	case m.checkinErr != nil:
+		return dimStyle.Render(fmt.Sprintf("(打卡跳过:%v)", m.checkinErr)) + "\n"
+	case m.checkin == nil:
+		return ""
+	case m.checkinJust:
+		return okStyle.Render(fmt.Sprintf("✅ 已自动打卡,累计 %d 天。", m.checkin.CheckinDays)) + "\n"
+	case m.checkin.Done():
+		return dimStyle.Render(fmt.Sprintf("今日已打卡,累计 %d 天。", m.checkin.CheckinDays)) + "\n"
+	}
+	return "" // 未满足打卡条件:静默
 }
 
 func sigOf(s *study.Session) string {

@@ -111,11 +111,19 @@ func (c *Client) getEncoded(path string, v any) error {
 }
 
 func (c *Client) putJSON(path string, reqBody, out any) error {
+	return c.writeJSON(http.MethodPut, path, reqBody, out)
+}
+
+func (c *Client) postJSON(path string, reqBody, out any) error {
+	return c.writeJSON(http.MethodPost, path, reqBody, out)
+}
+
+func (c *Client) writeJSON(method, path string, reqBody, out any) error {
 	data, err := json.Marshal(reqBody)
 	if err != nil {
 		return err
 	}
-	body, status, err := c.do(http.MethodPut, path, data)
+	body, status, err := c.do(method, path, data)
 	if err != nil {
 		return err
 	}
