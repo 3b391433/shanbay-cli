@@ -292,6 +292,7 @@ func runStudy(c *api.Client, args []string) error {
 			Checkin: !*noCheckin,
 		}))
 		fm, err := prog.Run()
+		audio.Stop() // stop any clip still playing when the TUI exits
 		if err != nil {
 			return err
 		}

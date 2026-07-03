@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -40,8 +41,16 @@ func Available() bool { return player != nil }
 
 var cache = map[string]string{}
 
-// Play downloads (cached) and plays the audio at url. Best-effort: any error is
-// returned but callers typically ignore it. No-op if no player or empty url.
+// Only one clip plays at a time: starting a new Play stops the previous one.
+// mu guards current, the process Play is currently waiting on.
+var (
+	mu      sync.Mutex
+	current *exec.Cmd
+)
+
+// Play downloads (cached) and plays the audio at url, first stopping whatever is
+// already playing. Best-effort: any error is returned but callers typically
+// ignore it. No-op if no player or empty url.
 func Play(url string) error {
 	if player == nil || url == "" {
 		return nil
@@ -54,7 +63,41 @@ func Play(url string) error {
 	defer cancel()
 	args := append(append([]string{}, player[1:]...), path)
 	cmd := exec.CommandContext(ctx, player[0], args...)
-	return cmd.Run()
+
+	// Stop the previous clip, then register ourselves as the current one.
+	mu.Lock()
+	stopLocked()
+	if err := cmd.Start(); err != nil {
+		mu.Unlock()
+		return err
+	}
+	current = cmd
+	mu.Unlock()
+
+	err = cmd.Wait()
+
+	// Deregister, unless a later Play already replaced (and killed) us.
+	mu.Lock()
+	if current == cmd {
+		current = nil
+	}
+	mu.Unlock()
+	return err
+}
+
+// Stop halts any clip currently playing. Safe to call when nothing is playing.
+func Stop() {
+	mu.Lock()
+	stopLocked()
+	mu.Unlock()
+}
+
+// stopLocked kills the currently playing clip. The caller must hold mu.
+func stopLocked() {
+	if current != nil && current.Process != nil {
+		_ = current.Process.Kill()
+		current = nil
+	}
 }
 
 func fetch(url string) (string, error) {
