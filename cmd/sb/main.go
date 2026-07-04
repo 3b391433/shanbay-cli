@@ -273,7 +273,7 @@ func runStudy(c *api.Client, args []string) error {
 	useAudio := !*mute
 	keys := keymap.Load()
 	if useAudio && !audio.Available() {
-		fmt.Fprintln(os.Stderr, "提示:未找到音频播放器,发音不可用(可 sudo apt install mpg123)。")
+		fmt.Fprintf(os.Stderr, "提示:未找到音频播放器,发音不可用(可 %s)。\n", audio.InstallHint())
 	}
 
 	book, err := c.CurrentBook()

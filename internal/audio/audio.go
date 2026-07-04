@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -38,6 +39,43 @@ func findPlayer() []string {
 
 // Available reports whether a usable player was found.
 func Available() bool { return player != nil }
+
+// InstallHint returns a command the user can run to install a supported player
+// on this system — e.g. "sudo apt install mpg123". It only builds the string;
+// it never installs anything. The command is picked by OS and, on Linux, by
+// which package manager is present, with a generic fallback when none matches.
+func InstallHint() string {
+	return installHint(runtime.GOOS, func(bin string) bool {
+		_, err := exec.LookPath(bin)
+		return err == nil
+	})
+}
+
+// installHint is the testable core of InstallHint: goos is a runtime.GOOS value
+// and has reports whether a binary is on PATH.
+func installHint(goos string, has func(bin string) bool) string {
+	switch goos {
+	case "darwin":
+		return "brew install mpg123"
+	case "linux":
+		// Probe package managers in rough order of prevalence; first match wins.
+		for _, pm := range []struct{ bin, cmd string }{
+			{"apt-get", "sudo apt install mpg123"},
+			{"dnf", "sudo dnf install mpg123"},
+			{"pacman", "sudo pacman -S mpg123"},
+			{"zypper", "sudo zypper install mpg123"},
+			{"apk", "sudo apk add mpg123"},
+			{"emerge", "sudo emerge media-sound/mpg123"},
+		} {
+			if has(pm.bin) {
+				return pm.cmd
+			}
+		}
+		return "用你的包管理器安装 mpg123、ffmpeg 或 mpv 之一"
+	default:
+		return "安装 mpg123、ffmpeg(ffplay)或 mpv 之一"
+	}
+}
 
 var cache = map[string]string{}
 
