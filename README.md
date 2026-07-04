@@ -45,7 +45,7 @@ git clone https://github.com/3b391433/shanbay-cli && cd shanbay-cli
 go build -o sb ./cmd/sb
 ```
 
-> 发音可选,依赖系统播放器之一:`mpg123` / `ffplay` / `mpv` / `gst-play-1.0`(没有则静默,不影响背单词)。
+> 发音可选,依赖系统播放器(**推荐 `ffplay` 或 `mpv`**;详见 [发音与音频播放器](#发音与音频播放器))。没有则静默,不影响背单词。
 
 ## 快速开始
 
@@ -107,6 +107,43 @@ TUI 里的按键:
 (未写出的动作沿用默认。)键名:字母/数字原样,特殊键用 `enter` / `esc` / `up` / `down` / `left` / `right` / `tab`,空格写成 `" "`。同一个键可在不同状态复用——上例里 `enter` 在提问时是「认识」、揭晓后是「下一词」。
 
 切换词书暂未支持,请在扇贝 App / 网页上切换;`sb` 跟随当前词书。
+
+## 发音与音频播放器
+
+发音是可选功能:`sb` 调用系统里**第一个可用**的命令行播放器放音频(都没有则静默,不影响背单词)。按下列优先级探测:
+
+| 播放器 | 格式 | 说明 |
+|---|---|---|
+| `ffplay`(来自 ffmpeg) | MP3 + AAC | 推荐 |
+| `mpv` | MP3 + AAC | 推荐 |
+| `gst-play-1.0`(GStreamer) | MP3 + AAC | 可用 |
+| `mpg123` | **仅 MP3** | 兜底;放不了 AAC |
+
+> ⚠️ 单词发音是 MP3,**例句音频是 AAC**。若只装了 `mpg123`,例句会被当成 MP3 硬解成刺耳噪音——请装 `ffplay` 或 `mpv`。
+
+安装(任选其一):
+
+```bash
+sudo apt install ffmpeg      # Debian/Ubuntu(提供 ffplay);或 sudo apt install mpv
+sudo dnf install ffmpeg      # Fedora
+sudo pacman -S ffmpeg        # Arch
+brew install ffmpeg          # macOS
+```
+
+### WSL 下音频卡顿 / 电音?
+
+WSL2(WSLg)把声音经 RDP 转发给 Windows,缓冲欠载会造成卡顿、爆音、金属电音——这是 [WSLg 的已知问题](https://github.com/microsoft/wslg/issues/908)(原生 Linux 无此问题,与本工具无关)。缓解:
+
+```bash
+# 1) 关掉 systemd-timesyncd:其时钟校正会让 PulseAudio 欠载
+#    (WSL 仍从 Windows 宿主取时间,系统时钟不受影响)
+sudo systemctl disable --now systemd-timesyncd
+
+# 2) 加大 PulseAudio 客户端缓冲(写进 ~/.bashrc,重开终端生效)
+echo 'export PULSE_LATENCY_MSEC=300' >> ~/.bashrc
+```
+
+仍不理想可把 `PULSE_LATENCY_MSEC` 调更大(如 `500`),或改用 `mpv`(其 `--audio-buffer` 缓冲更稳)。要彻底绕开 RDP,可在 Windows 侧跑 [pulseaudio-win32](https://github.com/pgaskin/pulseaudio-win32) 并让 WSL 用 TCP 直连(代价是延迟略高)。
 
 ## 注意
 
