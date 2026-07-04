@@ -17,12 +17,15 @@ import (
 )
 
 // candidate players, each entry is {binary, args...}; the file path is appended.
-// All exit on end-of-stream so a play call returns promptly.
+// All exit on end-of-stream so a play call returns promptly. Ordered so that
+// players able to decode everything Shanbay serves (word MP3 + example AAC) win;
+// mpg123 is MP3-only and would turn AAC into noise, so it sits last as a
+// best-effort fallback.
 var candidates = [][]string{
-	{"mpg123", "-q"},
 	{"ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"},
 	{"mpv", "--no-video", "--really-quiet"},
 	{"gst-play-1.0"},
+	{"mpg123", "-q"},
 }
 
 var player = findPlayer()
