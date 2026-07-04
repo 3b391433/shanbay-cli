@@ -272,8 +272,13 @@ func runStudy(c *api.Client, args []string) error {
 	mixed := *order != "new-first"
 	useAudio := !*mute
 	keys := keymap.Load()
-	if useAudio && !audio.Available() {
-		fmt.Fprintf(os.Stderr, "提示:未找到音频播放器,发音不可用(可 %s)。\n", audio.InstallHint())
+	if useAudio {
+		switch {
+		case !audio.Available():
+			fmt.Fprintf(os.Stderr, "提示:未找到音频播放器,发音不可用(装 ffplay/mpv:%s)。\n", audio.InstallHint())
+		case !audio.FullFormat():
+			fmt.Fprintf(os.Stderr, "提示:当前用 %s(仅支持 MP3),部分例句为 AAC 无法播放;装 ffplay/mpv 可播放全部(%s)。\n", audio.PlayerName(), audio.InstallHint())
+		}
 	}
 
 	book, err := c.CurrentBook()

@@ -43,10 +43,30 @@ func findPlayer() []string {
 // Available reports whether a usable player was found.
 func Available() bool { return player != nil }
 
-// InstallHint returns a command the user can run to install a supported player
-// on this system — e.g. "sudo apt install mpg123". It only builds the string;
-// it never installs anything. The command is picked by OS and, on Linux, by
-// which package manager is present, with a generic fallback when none matches.
+// mp3Only lists players that decode MP3 but not AAC. Some Shanbay clips (certain
+// example sentences) are AAC, so these players can't play everything.
+var mp3Only = map[string]bool{"mpg123": true}
+
+// PlayerName returns the base name of the selected player (e.g. "ffplay"), or ""
+// when none was found.
+func PlayerName() string {
+	if player == nil {
+		return ""
+	}
+	return filepath.Base(player[0])
+}
+
+// FullFormat reports whether the selected player can decode everything Shanbay
+// serves (MP3 + AAC). It is false when the only player found is MP3-only
+// (mpg123), letting callers nudge the user toward ffplay/mpv.
+func FullFormat() bool { return fullFormat(PlayerName()) }
+
+func fullFormat(name string) bool { return name != "" && !mp3Only[name] }
+
+// InstallHint returns an OS-appropriate command to install a recommended
+// full-format player (ffmpeg, which provides ffplay). It only builds the string;
+// it never installs anything. Falls back to a generic message when the platform
+// or package manager isn't recognized.
 func InstallHint() string {
 	return installHint(runtime.GOOS, func(bin string) bool {
 		_, err := exec.LookPath(bin)
@@ -59,24 +79,24 @@ func InstallHint() string {
 func installHint(goos string, has func(bin string) bool) string {
 	switch goos {
 	case "darwin":
-		return "brew install mpg123"
+		return "brew install ffmpeg"
 	case "linux":
 		// Probe package managers in rough order of prevalence; first match wins.
 		for _, pm := range []struct{ bin, cmd string }{
-			{"apt-get", "sudo apt install mpg123"},
-			{"dnf", "sudo dnf install mpg123"},
-			{"pacman", "sudo pacman -S mpg123"},
-			{"zypper", "sudo zypper install mpg123"},
-			{"apk", "sudo apk add mpg123"},
-			{"emerge", "sudo emerge media-sound/mpg123"},
+			{"apt-get", "sudo apt install ffmpeg"},
+			{"dnf", "sudo dnf install ffmpeg"},
+			{"pacman", "sudo pacman -S ffmpeg"},
+			{"zypper", "sudo zypper install ffmpeg"},
+			{"apk", "sudo apk add ffmpeg"},
+			{"emerge", "sudo emerge media-video/ffmpeg"},
 		} {
 			if has(pm.bin) {
 				return pm.cmd
 			}
 		}
-		return "用你的包管理器安装 mpg123、ffmpeg 或 mpv 之一"
+		return "用你的包管理器安装 ffmpeg 或 mpv"
 	default:
-		return "安装 mpg123、ffmpeg(ffplay)或 mpv 之一"
+		return "安装 ffmpeg 或 mpv"
 	}
 }
 
