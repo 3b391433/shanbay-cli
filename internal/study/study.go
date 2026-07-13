@@ -10,6 +10,7 @@ package study
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/3b391433/shanbay-cli/internal/api"
 )
@@ -61,21 +62,19 @@ type Session struct {
 	Content      map[string]api.VocabWithSenses
 }
 
-// Load fetches the queue (items/sync) and word content (today_learning_items).
-// withReviewContent also pulls REVIEW word text (needed only to display reviews).
-func Load(c *api.Client, mbid string, withReviewContent bool) (*Session, error) {
-	status, err := c.BookStatus(mbid)
-	if err != nil {
-		return nil, fmt.Errorf("status: %w", err)
-	}
-	sync, err := c.BookSync(mbid)
-	if err != nil {
-		return nil, fmt.Errorf("sync: %w", err)
-	}
+// Content is today's day-stable word pool (item_id → vocab). It only grows when
+// 再来一组 (NextTurn) adds new words, so it can be loaded once (LoadContent) and
+// reused across groups within a session (LoadQueue) — the expensive, decoded
+// today_learning_items fetch then happens once per session instead of per group.
+type Content = map[string]api.VocabWithSenses
 
-	content := map[string]api.VocabWithSenses{}
+// LoadContent pages through today_learning_items to build the word pool: NEW
+// always, REVIEW when withReview. This is the heavy, decoded fetch — load it
+// once and pass it to LoadQueue for each group.
+func LoadContent(c *api.Client, mbid string, withReview bool) (Content, error) {
+	content := Content{}
 	const ipp = 50 // server caps ipp at range(1,50)
-	loadContent := func(typeOf string) error {
+	loadType := func(typeOf string) error {
 		for page := 1; ; page++ {
 			t, err := c.BookTodayItems(mbid, typeOf, page, ipp)
 			if err != nil {
@@ -89,19 +88,53 @@ func Load(c *api.Client, mbid string, withReviewContent bool) (*Session, error) 
 			}
 		}
 	}
-	if err := loadContent("NEW"); err != nil {
+	if err := loadType("NEW"); err != nil {
 		return nil, fmt.Errorf("today NEW: %w", err)
 	}
-	if withReviewContent {
-		if err := loadContent("REVIEW"); err != nil {
+	if withReview {
+		if err := loadType("REVIEW"); err != nil {
 			return nil, fmt.Errorf("today REVIEW: %w", err)
 		}
+	}
+	return content, nil
+}
+
+// LoadQueue fetches the working queue (statuses + items/sync) and pairs it with
+// already-loaded content. Both are plain-JSON GETs and run concurrently — this
+// is the cheap per-group refresh that runs between groups.
+func LoadQueue(c *api.Client, mbid string, content Content) (*Session, error) {
+	var (
+		status    *api.BookStatus
+		queue     *api.SyncItems
+		statusErr error
+		queueErr  error
+		wg        sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() { defer wg.Done(); status, statusErr = c.BookStatus(mbid) }()
+	go func() { defer wg.Done(); queue, queueErr = c.BookSync(mbid) }()
+	wg.Wait()
+	if statusErr != nil {
+		return nil, fmt.Errorf("status: %w", statusErr)
+	}
+	if queueErr != nil {
+		return nil, fmt.Errorf("sync: %w", queueErr)
 	}
 	return &Session{
 		MBID: mbid, Date: status.Date, LearningTime: status.LearningTime,
 		CanNextTurn: status.CanInitNextTurn,
-		AItems:      sync.ANotFinished, CItems: sync.CNotFinished, Content: content,
+		AItems:      queue.ANotFinished, CItems: queue.CNotFinished, Content: content,
 	}, nil
+}
+
+// Load does a full load (content + queue) in one call. Kept for the first turn
+// and the line-mode fallback; hot paths reuse content via LoadContent+LoadQueue.
+func Load(c *api.Client, mbid string, withReviewContent bool) (*Session, error) {
+	content, err := LoadContent(c, mbid, withReviewContent)
+	if err != nil {
+		return nil, err
+	}
+	return LoadQueue(c, mbid, content)
 }
 
 // Cards returns the words to present: NEW always, REVIEW when includeReview.

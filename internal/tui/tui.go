@@ -82,11 +82,13 @@ type Model struct {
 
 	phase       phase
 	sess        *study.Session
+	content     study.Content          // 当天单词内容池(日内稳定,跨组复用;NextTurn 后失效重拉)
 	cards       []study.Card           // 当前组工作队列(FIFO,cards[0]=当前)
 	curDone     bool                   // 当前词已评分,正在展示答案
 	curResult   study.Grade            // 当前词的判定
 	grades      map[string]study.Grade // 已判定为 认识/太简单 的词(提交用)
 	knownStreak map[string]int         // 各词连续「认识」次数(达标才出队)
+	seen        map[string]bool        // 本组内已出现过的词(首见即认识直接出队)
 	touched     bool                   // 本轮是否评过分
 	groupTotal  int                    // 本组初始词数
 	groupDone   int                    // 本组已学会数
@@ -108,9 +110,10 @@ type Model struct {
 
 // messages
 type turnLoadedMsg struct {
-	sess  *study.Session
-	cards []study.Card
-	sig   string
+	sess    *study.Session
+	cards   []study.Card
+	sig     string
+	content study.Content // 复用/新拉到的内容池,回存以供下一组复用
 }
 type turnEmptyMsg struct{ first, canNext bool }
 type reloadMsg struct{}
@@ -134,7 +137,7 @@ func New(cfg Config) Model {
 	if cfg.Keys.Empty() {
 		cfg.Keys = keymap.Default()
 	}
-	return Model{cfg: cfg, phase: phaseLoading, grades: map[string]study.Grade{}, knownStreak: map[string]int{}, examples: map[string][]api.Example{}}
+	return Model{cfg: cfg, phase: phaseLoading, grades: map[string]study.Grade{}, knownStreak: map[string]int{}, seen: map[string]bool{}, examples: map[string][]api.Example{}}
 }
 
 // Err returns a terminal error (e.g. auth failure) so the caller can re-login.
@@ -142,10 +145,21 @@ func (m Model) Err() error { return m.err }
 
 func (m Model) Init() tea.Cmd { return m.loadTurnCmd() }
 
+// loadTurnCmd loads the next group. Today's content pool is day-stable, so it's
+// fetched once and reused (m.content); only status+sync are refreshed each group
+// (concurrently, in LoadQueue). m.content is nil on the first turn and is reset
+// after 再来一组 (NextTurn may add new words), forcing a content refresh then.
 func (m Model) loadTurnCmd() tea.Cmd {
-	cfg, first, prevSig := m.cfg, m.turn == 0, m.prevSig
+	cfg, first, prevSig, content := m.cfg, m.turn == 0, m.prevSig, m.content
 	return func() tea.Msg {
-		sess, err := study.Load(cfg.Client, cfg.MBID, cfg.Review)
+		if content == nil {
+			c, err := study.LoadContent(cfg.Client, cfg.MBID, cfg.Review)
+			if err != nil {
+				return errMsg{err}
+			}
+			content = c
+		}
+		sess, err := study.LoadQueue(cfg.Client, cfg.MBID, content)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -157,7 +171,7 @@ func (m Model) loadTurnCmd() tea.Cmd {
 			// 理论上不该发生(每组学完才提交,not_finished 必然变化);兜底退出
 			return turnEmptyMsg{canNext: sess.CanNextTurn}
 		}
-		return turnLoadedMsg{sess: sess, cards: cards, sig: sigOf(sess)}
+		return turnLoadedMsg{sess: sess, cards: cards, sig: sigOf(sess), content: content}
 	}
 }
 
@@ -268,7 +282,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.finish()
 	case reloadMsg:
 		m.phase = phaseLoading
-		m.prevSig = "" // 新一组,允许重新加载
+		m.prevSig = ""  // 新一组,允许重新加载
+		m.content = nil // 再来一组可能加入新词,失效内容缓存重新拉取
 		return m, m.loadTurnCmd()
 	case turnLoadedMsg:
 		cards := msg.cards
@@ -285,10 +300,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cards = cards[:rem]
 			}
 		}
-		m.sess, m.cards = msg.sess, cards
+		m.sess, m.cards, m.content = msg.sess, cards, msg.content
 		m.groupTotal, m.groupDone = len(cards), 0
 		m.curDone, m.curResult = false, study.Unknown
-		m.grades, m.knownStreak, m.touched, m.prevSig = map[string]study.Grade{}, map[string]int{}, false, msg.sig
+		m.grades, m.knownStreak, m.seen = map[string]study.Grade{}, map[string]int{}, map[string]bool{}
+		m.touched, m.prevSig = false, msg.sig
 		m.turn++
 		m.phase = phaseStudying
 		return m, m.onCardShown()
@@ -400,8 +416,13 @@ func (m *Model) grade(g study.Grade)    { m.setGrade(g); m.curDone = true }
 
 // advance applies the current grade: 认识/太简单 finish the word (leave queue),
 // 不认识 rotates it to the back to study again. Submits when the queue empties.
+//
+// 认识出队规则:本轮首次出现就认识 → 直接出队(初见即会,无需巩固);一旦判过
+// 不认识而重排队,则回到「连续两次认识」的巩固逻辑(ConsecutiveKnown)。
 func (m Model) advance() (tea.Model, tea.Cmd) {
 	id := m.cards[0].ItemID
+	firstSight := !m.seen[id]
+	m.seen[id] = true
 	finish := func() { m.grades[id] = m.curResult; m.groupDone++; m.cards = m.cards[1:] }
 	requeue := func() { m.cards = append(append([]study.Card{}, m.cards[1:]...), m.cards[0]) }
 
@@ -409,6 +430,10 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 	case study.TooEasy:
 		finish() // 太简单:一次即出队
 	case study.Known:
+		if firstSight {
+			finish() // 首见即会,直接出队
+			break
+		}
 		m.knownStreak[id]++
 		if m.knownStreak[id] >= study.ConsecutiveKnown {
 			finish() // 连续认识达标,出队
@@ -524,7 +549,9 @@ func (m Model) resultLabel() string {
 	case study.TooEasy:
 		return okStyle.Render("⏭ 太简单·已掌握(不再复习)")
 	case study.Known:
-		if m.knownStreak[m.cards[0].ItemID]+1 >= study.ConsecutiveKnown {
+		id := m.cards[0].ItemID
+		// 首见即会,或(被不认识过后)连续认识达标 → 出队
+		if !m.seen[id] || m.knownStreak[id]+1 >= study.ConsecutiveKnown {
 			return okStyle.Render("✓ 认识 ✓ 已掌握")
 		}
 		return okStyle.Render("✓ 认识(再巩固一次)")

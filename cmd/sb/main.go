@@ -311,9 +311,17 @@ func runStudy(c *api.Client, args []string) error {
 	start := time.Now()
 	totalKnown := 0
 	prevSig := ""
+	var content study.Content // 当天内容池:一次加载跨组复用(再来一组后置 nil 重拉)
 
 	for turn := 1; turn <= 100; turn++ {
-		sess, err := study.Load(c, mbid, review)
+		if content == nil {
+			loaded, err := study.LoadContent(c, mbid, review)
+			if err != nil {
+				return err
+			}
+			content = loaded
+		}
+		sess, err := study.LoadQueue(c, mbid, content)
 		if err != nil {
 			return err
 		}
@@ -326,6 +334,7 @@ func runStudy(c *api.Client, args []string) error {
 						return err
 					}
 					prevSig = ""
+					content = nil // 再来一组可能加入新词,失效内容缓存重新拉取
 					continue
 				}
 			}
@@ -363,6 +372,7 @@ func runStudy(c *api.Client, args []string) error {
 
 		grades := map[string]study.Grade{}
 		knownStreak := map[string]int{}
+		seen := map[string]bool{} // 本组内已出现过的词(首见即认识直接出队)
 		queue := append([]study.Card{}, prompt...)
 		groupTotal := len(queue)
 		quit, touched := false, false
@@ -386,18 +396,26 @@ func runStudy(c *api.Client, args []string) error {
 				break
 			}
 			ans := strings.ToLower(strings.TrimSpace(sc.Text()))
+			firstSight := !seen[card.ItemID]
+			seen[card.ItemID] = true
 			switch {
 			case keymap.Has(keys.Quit, ans):
 				quit = true
 			case keymap.Has(keys.Known, ans):
 				touched = true
-				knownStreak[card.ItemID]++
-				if knownStreak[card.ItemID] >= study.ConsecutiveKnown {
+				switch {
+				case firstSight: // 首见即会,直接出队
 					grades[card.ItemID] = study.Known
 					queue = queue[1:]
-				} else {
-					queue = append(append([]study.Card{}, queue[1:]...), card)
-					fmt.Println("       ✓ 认识,再巩固一次")
+				default: // 被不认识过后,连续两次认识才出队
+					knownStreak[card.ItemID]++
+					if knownStreak[card.ItemID] >= study.ConsecutiveKnown {
+						grades[card.ItemID] = study.Known
+						queue = queue[1:]
+					} else {
+						queue = append(append([]study.Card{}, queue[1:]...), card)
+						fmt.Println("       ✓ 认识,再巩固一次")
+					}
 				}
 			case keymap.Has(keys.TooEasy, ans):
 				grades[card.ItemID] = study.TooEasy

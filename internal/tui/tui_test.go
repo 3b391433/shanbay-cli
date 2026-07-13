@@ -23,6 +23,7 @@ func studyingModel() Model {
 		phase:       phaseStudying,
 		grades:      map[string]study.Grade{},
 		knownStreak: map[string]int{},
+		seen:        map[string]bool{},
 		examples:    map[string][]api.Example{},
 		turn:        1,
 		sess:        &study.Session{AItems: []api.SyncItem{{ItemID: "a"}, {ItemID: "b"}}},
@@ -39,6 +40,7 @@ func oneCardModel() Model {
 		phase:       phaseStudying,
 		grades:      map[string]study.Grade{},
 		knownStreak: map[string]int{},
+		seen:        map[string]bool{},
 		examples:    map[string][]api.Example{},
 		turn:        1,
 		sess:        &study.Session{AItems: []api.SyncItem{{ItemID: "a"}}},
@@ -55,13 +57,27 @@ func step(m Model, gradeKey string) Model {
 	return m3.(Model)
 }
 
-func TestKnownTwiceToFinish(t *testing.T) {
-	// 认识一次 → 重排队,仍在学
-	m := step(oneCardModel(), "k")
-	if m.phase != phaseStudying || len(m.cards) != 1 || m.knownStreak["a"] != 1 || m.grades["a"] == study.Known {
-		t.Fatalf("第一次认识应重排队: phase=%d len=%d streak=%d", m.phase, len(m.cards), m.knownStreak["a"])
+func TestFirstSightKnownFinishes(t *testing.T) {
+	// 本轮首次出现即认识 → 直接出队 → 组空 → 提交
+	m2, _ := oneCardModel().Update(key("k"))
+	m3, cmd := m2.(Model).Update(key(" "))
+	mm := m3.(Model)
+	if mm.phase != phaseSubmitting || cmd == nil || mm.grades["a"] != study.Known {
+		t.Fatalf("首见即认识应直接出队提交: phase=%d grade=%v", mm.phase, mm.grades["a"])
 	}
-	// 再认识 → 连续两次,出队 → 组空 → 提交
+}
+
+func TestKnownTwiceAfterUnknown(t *testing.T) {
+	// 先不认识(进入巩固路径)→ 此后需连续两次认识才出队
+	m := step(oneCardModel(), "f") // 不认识 → 重排队(已出现过)
+	if m.phase != phaseStudying || len(m.cards) != 1 {
+		t.Fatalf("不认识应重排队: phase=%d len=%d", m.phase, len(m.cards))
+	}
+	m = step(m, "k") // 第一次认识(非首见)→ streak 1,仍重排队
+	if m.phase != phaseStudying || m.knownStreak["a"] != 1 || m.grades["a"] == study.Known {
+		t.Fatalf("不认识后第一次认识应重排队: phase=%d streak=%d", m.phase, m.knownStreak["a"])
+	}
+	// 第二次认识 → 连续两次,出队 → 组空 → 提交
 	m2, _ := m.Update(key("k"))
 	m3, cmd := m2.(Model).Update(key(" "))
 	mm := m3.(Model)
@@ -71,8 +87,12 @@ func TestKnownTwiceToFinish(t *testing.T) {
 }
 
 func TestUnknownResetsKnownStreak(t *testing.T) {
-	m := step(oneCardModel(), "k") // streak 1
-	m = step(m, "f")               // 不认识 → 清零
+	m := step(oneCardModel(), "f") // 不认识 → 已出现过,streak 0
+	m = step(m, "k")               // 认识(非首见)→ streak 1
+	if m.knownStreak["a"] != 1 {
+		t.Fatalf("认识应累计连续计数, streak=%d", m.knownStreak["a"])
+	}
+	m = step(m, "f") // 不认识 → 清零
 	if m.knownStreak["a"] != 0 {
 		t.Fatalf("不认识应清零连续计数, streak=%d", m.knownStreak["a"])
 	}
