@@ -60,6 +60,7 @@ const (
 	phaseCheckin // 今日完成,正在自动打卡
 	phaseDone
 	phaseError
+	phaseBoss // 老板键:显示伪装的 apt update 输出,再按任意键返回
 )
 
 // Config parameterizes a study session.
@@ -96,6 +97,7 @@ type Model struct {
 	turn        int
 	prevSig     string
 	quitting    bool
+	bossReturn  phase // 老板键:进入伪装界面前的 phase,退出老板键时恢复
 
 	totalKnown int // 本次累计学会(认识+太简单)
 	status     *api.BookStatus
@@ -342,6 +344,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
 	k := m.cfg.Keys
 
+	// 老板键:处于伪装界面时只有 boss 键才能返回,其它键忽略以免露馅
+	if m.phase == phaseBoss {
+		if keymap.Has(k.Boss, s) {
+			m.phase = m.bossReturn
+		}
+		return m, nil
+	}
+	if keymap.Has(k.Boss, s) {
+		m.bossReturn = m.phase
+		m.phase = phaseBoss
+		return m, nil
+	}
+
 	if m.phase == phaseMore {
 		switch {
 		case keymap.Has(k.Quit, s):
@@ -493,8 +508,36 @@ func (m Model) View() string {
 		return m.doneView()
 	case phaseStudying:
 		return m.studyView()
+	case phaseBoss:
+		return bossView()
 	}
 	return ""
+}
+
+// bossView 渲染伪装的 `sudo apt update` 输出,用于混过路过的老板/同事。
+// 内容纯静态,按任意键返回原界面。
+func bossView() string {
+	return "$ sudo apt update\n" +
+		"Hit:1 http://archive.ubuntu.com/ubuntu jammy InRelease\n" +
+		"Get:2 http://security.ubuntu.com/ubuntu jammy-security InRelease [110 kB]\n" +
+		"Get:3 http://archive.ubuntu.com/ubuntu jammy-updates InRelease [119 kB]\n" +
+		"Get:4 http://archive.ubuntu.com/ubuntu jammy-backports InRelease [108 kB]\n" +
+		"Get:5 http://security.ubuntu.com/ubuntu jammy-security/main amd64 Packages [1,842 kB]\n" +
+		"Get:6 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 Packages [1,516 kB]\n" +
+		"Get:7 http://security.ubuntu.com/ubuntu jammy-security/main Translation-en [284 kB]\n" +
+		"Get:8 http://archive.ubuntu.com/ubuntu jammy-updates/main Translation-en [312 kB]\n" +
+		"Get:9 http://security.ubuntu.com/ubuntu jammy-security/universe amd64 Packages [947 kB]\n" +
+		"Get:10 http://archive.ubuntu.com/ubuntu jammy-updates/universe amd64 Packages [1,224 kB]\n" +
+		"Get:11 http://archive.ubuntu.com/ubuntu jammy-updates/universe Translation-en [278 kB]\n" +
+		"Get:12 http://security.ubuntu.com/ubuntu jammy-security/restricted amd64 Packages [2,105 kB]\n" +
+		"Get:13 http://archive.ubuntu.com/ubuntu jammy-updates/restricted amd64 Packages [2,187 kB]\n" +
+		"Get:14 http://archive.ubuntu.com/ubuntu jammy-updates/multiverse amd64 Packages [51.8 kB]\n" +
+		"Fetched 11.1 MB in 3s (3,682 kB/s)\n" +
+		"Reading package lists... Done\n" +
+		"Building dependency tree... Done\n" +
+		"Reading state information... Done\n" +
+		"42 packages can be upgraded. Run 'apt list --upgradable' to see them.\n" +
+		"$ "
 }
 
 func (m Model) studyView() string {
@@ -535,11 +578,11 @@ func (m Model) studyView() string {
 	}
 
 	k := m.cfg.Keys
-	help := fmt.Sprintf("%s 认识   %s 不认识   %s 太简单   %s 发音   %s 退出",
-		keymap.First(k.Known), keymap.First(k.Unknown), keymap.First(k.TooEasy), keymap.First(k.Audio), keymap.First(k.Quit))
+	help := fmt.Sprintf("%s 认识   %s 不认识   %s 太简单   %s 发音   %s 老板键   %s 退出",
+		keymap.First(k.Known), keymap.First(k.Unknown), keymap.First(k.TooEasy), keymap.First(k.Audio), keymap.First(k.Boss), keymap.First(k.Quit))
 	if m.curDone {
-		help = fmt.Sprintf("%s 下一词   %s/%s/%s 改判   %s 发音   %s 退出",
-			keymap.First(k.Next), keymap.First(k.Known), keymap.First(k.Unknown), keymap.First(k.TooEasy), keymap.First(k.Audio), keymap.First(k.Quit))
+		help = fmt.Sprintf("%s 下一词   %s/%s/%s 改判   %s 发音   %s 老板键   %s 退出",
+			keymap.First(k.Next), keymap.First(k.Known), keymap.First(k.Unknown), keymap.First(k.TooEasy), keymap.First(k.Audio), keymap.First(k.Boss), keymap.First(k.Quit))
 	}
 	return "\n" + m.bookTitle() + dimStyle.Render(header) + "\n" + cardStyle.Render(b.String()) + "\n" + helpStyle.Render(help) + "\n"
 }
@@ -602,8 +645,8 @@ func (m Model) moreView() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "再来一组?   %s 再来一组    %s 结束   (每日最多 3 组)\n",
-		keymap.First(k.Next), keymap.First(k.Quit))
+	fmt.Fprintf(&b, "再来一组?   %s 再来一组    %s 老板键    %s 结束   (每日最多 3 组)\n",
+		keymap.First(k.Next), keymap.First(k.Boss), keymap.First(k.Quit))
 	return b.String()
 }
 

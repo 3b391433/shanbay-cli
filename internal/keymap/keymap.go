@@ -22,6 +22,7 @@ type Keymap struct {
 	Next    []string `json:"next"`     // 揭晓后进入下一词
 	Audio   []string `json:"audio"`    // 重新发音
 	Quit    []string `json:"quit"`     // 结束并提交
+	Boss    []string `json:"boss"`     // 老板键:切换伪装的 apt 输出界面
 }
 
 // Default is the built-in binding (number keys are Chinese-IME friendly).
@@ -33,6 +34,7 @@ func Default() Keymap {
 		Next:    []string{"enter", " ", "space"},
 		Audio:   []string{"0", "p"},
 		Quit:    []string{"esc", "q"},
+		Boss:    []string{"b"},
 	}
 }
 
@@ -65,6 +67,7 @@ func Load() Keymap {
 		mergeNonEmpty(&km.Next, u.Next)
 		mergeNonEmpty(&km.Audio, u.Audio)
 		mergeNonEmpty(&km.Quit, u.Quit)
+		mergeNonEmpty(&km.Boss, u.Boss)
 	}
 	return km
 }
@@ -81,7 +84,7 @@ func Has(list []string, key string) bool { return slices.Contains(list, key) }
 // Empty reports a zero keymap (no bindings) — used to fall back to Default.
 func (k Keymap) Empty() bool {
 	return len(k.Known) == 0 && len(k.Unknown) == 0 && len(k.TooEasy) == 0 &&
-		len(k.Next) == 0 && len(k.Audio) == 0 && len(k.Quit) == 0
+		len(k.Next) == 0 && len(k.Audio) == 0 && len(k.Quit) == 0 && len(k.Boss) == 0
 }
 
 // Label returns a friendly display name for a key (空格/↵/esc/…).
