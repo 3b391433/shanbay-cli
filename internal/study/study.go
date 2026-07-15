@@ -72,6 +72,11 @@ type Content = map[string]api.VocabWithSenses
 // always, REVIEW when withReview. This is the heavy, decoded fetch — load it
 // once and pass it to LoadQueue for each group.
 func LoadContent(c *api.Client, mbid string, withReview bool) (Content, error) {
+	// 跨天首次访问时 today_learning_items 会 412(lazy init)。先打一次轻量的
+	// items/sync 推动服务端准备数据,忽略结果——就算它自己也 412,后续
+	// BookTodayItems 的 retryNotReady 仍会兜底轮询。
+	_, _ = c.BookSync(mbid)
+
 	content := Content{}
 	const ipp = 50 // server caps ipp at range(1,50)
 	loadType := func(typeOf string) error {
