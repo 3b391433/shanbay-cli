@@ -88,10 +88,11 @@ func bookPath(mbid, suffix string) string {
 
 // retryNotReady polls fn while it returns ErrDataNotReady. On a new day the
 // learning data is computed lazily server-side: the first request 412s, then it
-// becomes ready within a few seconds (the web client polls 20×500ms the same way).
+// becomes ready within a few seconds. Web client uses 20×500ms; we widen to
+// 30×800ms (~24s) as a conservative safety net when reinit is slow.
 func (c *Client) retryNotReady(fn func() error) error {
-	const attempts = 20
-	const delay = 500 * time.Millisecond
+	const attempts = 30
+	const delay = 800 * time.Millisecond
 	var err error
 	for i := range attempts {
 		if err = fn(); !errors.Is(err, ErrDataNotReady) {
@@ -128,6 +129,18 @@ func (c *Client) BookTodayItems(mbid, typeOf string, page, ipp int) (*TodayItems
 // SubmitItems sends graded results (PUT). This mutates real learning progress.
 func (c *Client) SubmitItems(mbid string, body SubmitBody) error {
 	return c.putJSON(bookPath(mbid, "learning/items/sync"), body, nil)
+}
+
+// BookReinit actively triggers server-side lazy init of the day's learning
+// data (POST .../reinit). Callers use it to preempt the 412 "data not ready"
+// window; the response body is uninteresting — only status matters.
+func (c *Client) BookReinit(mbid string) error {
+	p := bookPath(mbid, "reinit")
+	body, status, err := c.do(http.MethodPost, p, nil)
+	if err != nil {
+		return err
+	}
+	return statusErr(p, status, body)
 }
 
 // NextTurn asks the server for another group of words ("再来一组"). Allowed only
