@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
+
+	"github.com/mattn/go-isatty"
 )
 
 // Book-scoped learning endpoints under /wordsapp/user_material_books/{materialbookId}/...
@@ -87,20 +90,32 @@ func bookPath(mbid, suffix string) string {
 }
 
 // retryNotReady polls fn while it returns ErrDataNotReady. On a new day the
-// learning data is computed lazily server-side: the first request 412s, then it
-// becomes ready within a few seconds. Web client uses 20×500ms; we widen to
-// 30×800ms (~24s) as a conservative safety net when reinit is slow.
+// learning data is computed lazily server-side: reinit only queues the job,
+// content prep itself can take 60s~几分钟. We poll up to 150×800ms (~120s)
+// and, on a TTY, refresh a single-line "已等 Ns" progress hint on stderr so
+// the user knows the wait is real, not a hang.
 func (c *Client) retryNotReady(fn func() error) error {
-	const attempts = 30
+	const attempts = 150
 	const delay = 800 * time.Millisecond
+	isTTY := isatty.IsTerminal(os.Stderr.Fd())
+	start := time.Now()
 	var err error
 	for i := range attempts {
 		if err = fn(); !errors.Is(err, ErrDataNotReady) {
+			if isTTY {
+				fmt.Fprint(os.Stderr, "\r\033[K")
+			}
 			return err
+		}
+		if isTTY {
+			fmt.Fprintf(os.Stderr, "\r\033[K扇贝后端在准备今日数据…已等 %ds", int(time.Since(start).Seconds()))
 		}
 		if i < attempts-1 {
 			time.Sleep(delay)
 		}
+	}
+	if isTTY {
+		fmt.Fprint(os.Stderr, "\r\033[K")
 	}
 	return err
 }
