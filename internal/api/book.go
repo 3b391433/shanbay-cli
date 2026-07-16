@@ -146,9 +146,9 @@ func (c *Client) SubmitItems(mbid string, body SubmitBody) error {
 	return c.putJSON(bookPath(mbid, "learning/items/sync"), body, nil)
 }
 
-// BookReinit actively triggers server-side lazy init of the day's learning
-// data (POST .../reinit). Callers use it to preempt the 412 "data not ready"
-// window; the response body is uninteresting — only status matters.
+// BookReinit ⚠ 破坏性 ⚠:POST .../reinit 会重置今日学习进度(a_finished_count
+// 归零、已背记录清空),不是无损的"lazy init 触发器"。别在正常读路径上调用。
+// 保留是为了留一个未来做"重置今日进度"命令时的接入点。
 func (c *Client) BookReinit(mbid string) error {
 	p := bookPath(mbid, "reinit")
 	body, status, err := c.do(http.MethodPost, p, nil)

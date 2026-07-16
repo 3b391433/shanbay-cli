@@ -71,12 +71,11 @@ type Content = map[string]api.VocabWithSenses
 // LoadContent pages through today_learning_items to build the word pool: NEW
 // always, REVIEW when withReview. This is the heavy, decoded fetch — load it
 // once and pass it to LoadQueue for each group.
+//
+// 注意:不要在这里调用 BookReinit——尽管接口名像"lazy init 触发器",实测它
+// 会重置今日进度(把 a_finished_count/学习记录清零),曾把用户当天已背的进
+// 度打回未开始。跨天首次 412 由 retryNotReady 被动轮询兜底就好。
 func LoadContent(c *api.Client, mbid string, withReview bool) (Content, error) {
-	// 跨天首次访问时 today_learning_items 会 412(lazy init)。主动打一次
-	// reinit 让服务端立即开始准备当天数据,忽略结果——就算它失败,后续
-	// BookTodayItems 的 retryNotReady 仍会兜底轮询。
-	_ = c.BookReinit(mbid)
-
 	content := Content{}
 	const ipp = 50 // server caps ipp at range(1,50)
 	loadType := func(typeOf string) error {
