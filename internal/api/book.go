@@ -146,9 +146,13 @@ func (c *Client) SubmitItems(mbid string, body SubmitBody) error {
 	return c.putJSON(bookPath(mbid, "learning/items/sync"), body, nil)
 }
 
-// BookReinit ⚠ 破坏性 ⚠:POST .../reinit 会重置今日学习进度(a_finished_count
-// 归零、已背记录清空),不是无损的"lazy init 触发器"。别在正常读路径上调用。
-// 保留是为了留一个未来做"重置今日进度"命令时的接入点。
+// BookReinit ☠☠☠ 高危破坏性接口 ☠☠☠
+// POST .../reinit 会把**整本词书**的学习进度清空 —— 不是"重置今日",而是把
+// KNOWN/LEARNING/FORGOT/MASTERED 所有历史状态桶全部归零,finished_count → 0。
+// 实测代价:一次误调把用户 71 天学习进度全部抹掉,客户端无缓存、服务端无
+// 客户可见 undo,只能找扇贝客服要账号回滚。别再在自动流程里碰它。
+// 保留仅为将来做显式"清空本词书重新开始"命令时的接入点,且必须由用户手动
+// 二次确认。
 func (c *Client) BookReinit(mbid string) error {
 	p := bookPath(mbid, "reinit")
 	body, status, err := c.do(http.MethodPost, p, nil)

@@ -72,9 +72,11 @@ type Content = map[string]api.VocabWithSenses
 // always, REVIEW when withReview. This is the heavy, decoded fetch — load it
 // once and pass it to LoadQueue for each group.
 //
-// 注意:不要在这里调用 BookReinit——尽管接口名像"lazy init 触发器",实测它
-// 会重置今日进度(把 a_finished_count/学习记录清零),曾把用户当天已背的进
-// 度打回未开始。跨天首次 412 由 retryNotReady 被动轮询兜底就好。
+// ☠ 不要在这里(或任何自动路径上)调用 BookReinit ☠
+// 接口名很有迷惑性,实测它会清空**整本词书**的历史学习进度(KNOWN/
+// LEARNING/FORGOT/MASTERED 全部归零),不是"重新初始化今日"。跨天首次
+// 412 由 retryNotReady 的 120s 被动轮询兜底就够了。详见 BookReinit 头
+// 部血泪注释。
 func LoadContent(c *api.Client, mbid string, withReview bool) (Content, error) {
 	content := Content{}
 	const ipp = 50 // server caps ipp at range(1,50)
