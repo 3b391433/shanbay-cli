@@ -132,6 +132,21 @@ func (c *Client) BookSync(mbid string) (*SyncItems, error) {
 	return &s, err
 }
 
+// BookItemsAll returns today's item id buckets (a_item_ids: NEW, c_item_ids:
+// REVIEW). Unlike today_learning_items / items/sync / statuses this endpoint
+// does NOT 412 during the lazy-init window — it answers immediately and, as a
+// side effect, appears to kick the server into preparing the day's session.
+// Used purely as a nudge in LoadContent; ONE-SHOT, no retryNotReady wrapping.
+// Verified non-destructive (finish_count/finished_count/new_count/review_count
+// unchanged before/after call).
+func (c *Client) BookItemsAll(mbid string) error {
+	var s struct {
+		AItemIDs []string `json:"a_item_ids"`
+		CItemIDs []string `json:"c_item_ids"`
+	}
+	return c.getJSON(bookPath(mbid, "learning/items/all"), &s)
+}
+
 // BookTodayItems returns today's NEW/REVIEW words (decoded). It polls past the
 // transient ErrDataNotReady that occurs before the day's session is initialized.
 func (c *Client) BookTodayItems(mbid, typeOf string, page, ipp int) (*TodayItems, error) {
