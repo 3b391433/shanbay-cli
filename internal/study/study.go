@@ -78,12 +78,6 @@ type Content = map[string]api.VocabWithSenses
 // 412 由 retryNotReady 的 120s 被动轮询兜底就够了。详见 BookReinit 头
 // 部血泪注释。
 func LoadContent(c *api.Client, mbid string, withReview bool) (Content, error) {
-	// nudge: 跨天首次 today_learning_items 会 412(lazy init)。先打一次
-	// items/all(纯读、非破坏性、不受 lazy init 影响,返回当日 item id 桶),
-	// 网页版就是靠它秒开——这次调用似乎会顺带触发服务端准备今日数据。
-	// 忽略结果:就算失败,后续 BookTodayItems 的 retryNotReady 仍会兜底轮询。
-	_ = c.BookItemsAll(mbid)
-
 	content := Content{}
 	const ipp = 50 // server caps ipp at range(1,50)
 	loadType := func(typeOf string) error {
