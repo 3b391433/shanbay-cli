@@ -25,7 +25,7 @@ jobs:
             export GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0
             name="sb-${GOOS}-${GOARCH}"
             echo "building $name"
-            go build -trimpath -ldflags "-s -w" -o "dist/$name" ./cmd/sb
+            go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/$name" ./cmd/sb
             tar -czf "dist/$name.tar.gz" -C dist "$name"
             rm "dist/$name"
           done

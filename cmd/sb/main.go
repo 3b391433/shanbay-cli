@@ -6,6 +6,8 @@
 //	sb lookup <word>          查词
 //	sb goal [N]               查看/设置每日新词目标
 //	sb checkin                手动打卡(完成今日任务后;显示累计天数)
+//	sb version                打印版本号
+//	sb update                 从 GitHub Release 拉取并原地替换最新版
 //	sb study [flags]          背单词
 //	    --new-only            只背新词(默认含复习)
 //	    --order mixed|new-first  排列方式(默认 mixed 混合)
@@ -44,7 +46,12 @@ import (
 	"github.com/3b391433/shanbay-cli/internal/keymap"
 	"github.com/3b391433/shanbay-cli/internal/study"
 	"github.com/3b391433/shanbay-cli/internal/tui"
+	"github.com/3b391433/shanbay-cli/internal/updater"
 )
+
+// version 由 release 工作流通过 -ldflags "-X main.version=<tag>" 注入;
+// 本地 go build/go run 时保持 "dev"。
+var version = "dev"
 
 func main() {
 	// 裸 `sb` 或以 flag 开头(如 `sb --review`)默认走 study;否则首个参数是子命令。
@@ -54,6 +61,28 @@ func main() {
 		cmd, cmdArgs = args[0], args[1:]
 	}
 
+	// 隐藏子命令:后台缓存刷新进程的入口——不打印任何东西,也不触发提示。
+	if updater.IsRefreshSubcmd(cmd) {
+		updater.RefreshCacheCLI()
+		return
+	}
+
+	// 每日首次运行的一行升级提示;后台 fire 子进程刷新缓存,不阻塞主命令。
+	// 所有面向用户的命令(含 version/update/login)都做一次。
+	if notice := updater.NoticeAndBackgroundCheck(version); notice != "" {
+		fmt.Fprintln(os.Stderr, notice)
+	}
+
+	if cmd == "version" {
+		fmt.Println(version)
+		return
+	}
+	if cmd == "update" {
+		if err := updater.Install(version); err != nil {
+			fatal(err)
+		}
+		return
+	}
 	if cmd == "login" {
 		doLogin()
 		return
@@ -78,7 +107,7 @@ func main() {
 		case "study":
 			return runStudy(client, cmdArgs)
 		default:
-			return fmt.Errorf("未知命令: %s(可用: study/status/lookup/goal/checkin/login)", cmd)
+			return fmt.Errorf("未知命令: %s(可用: study/status/lookup/goal/checkin/login/update/version)", cmd)
 		}
 	}
 
