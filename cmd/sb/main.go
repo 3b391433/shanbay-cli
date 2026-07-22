@@ -316,6 +316,11 @@ func runStudy(c *api.Client, args []string) error {
 	}
 	mbid := book.MaterialbookID
 
+	// 并发预热:模仿网页首页那批 landing 请求,把 backend 各下游服务同时唤醒,
+	// 大幅降低跨零点第一次进入时 statuses 的 412 等待时间。fire-and-forget,
+	// 与下面的 LoadContent/LoadQueue 并发跑。
+	c.Warmup()
+
 	// Default to the TUI in an interactive terminal; fall back to the line UI
 	// for --plain, --dry-run, or when stdin is not a TTY (piped/CI).
 	if !*plain && !*dry && isTTY() {

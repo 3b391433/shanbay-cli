@@ -89,29 +89,51 @@ func bookPath(mbid, suffix string) string {
 	return fmt.Sprintf("/wordsapp/user_material_books/%s/%s", mbid, suffix)
 }
 
-// retryNotReady polls fn while it returns ErrDataNotReady. On a new day the
-// learning data is computed lazily server-side: reinit only queues the job,
-// content prep itself can take 60s~几分钟. We poll up to 150×800ms (~120s)
-// and, on a TTY, refresh a single-line "已等 Ns" progress hint on stderr so
-// the user knows the wait is real, not a hang.
+// retryNotReady polls fn while it returns ErrDataNotReady with **exponential
+// backoff**: 300ms → 450ms → 675ms → … capped at 5s, with a 5-minute total
+// budget. On a new day learning data is computed lazily server-side; init
+// time is unpredictable(几秒 ~ 几分钟)—早期高频探测抓住 backend 一 ready 就
+// 返回,后期拉长间隔避免刷屏还刷不动。
+//
+// 首次 412 时会补一次 Warmup(),模仿网页首页那批并发预取,把后端下游服务
+// 都唤醒一下——观测:网页"秒进"就是靠这批预热。
+//
+// TTY 上原地刷新"已等 Ns"进度条,提示这是真等待不是 hang。
 func (c *Client) retryNotReady(fn func() error) error {
-	const attempts = 150
-	const delay = 800 * time.Millisecond
+	const (
+		initialDelay = 300 * time.Millisecond
+		maxDelay     = 5 * time.Second
+		maxWait      = 5 * time.Minute
+	)
 	isTTY := isatty.IsTerminal(os.Stderr.Fd())
 	start := time.Now()
+	deadline := start.Add(maxWait)
+	delay := initialDelay
+	var wu warmupOnce
 	var err error
-	for i := range attempts {
+	for {
 		if err = fn(); !errors.Is(err, ErrDataNotReady) {
 			if isTTY {
 				fmt.Fprint(os.Stderr, "\r\033[K")
 			}
 			return err
 		}
-		if isTTY {
-			fmt.Fprintf(os.Stderr, "\r\033[K扇贝后端在准备今日数据…已等 %ds", int(time.Since(start).Seconds()))
+		// 第一次 412 才补预热——避免每次调用都重复戳
+		wu.fire(c)
+		now := time.Now()
+		if !now.Before(deadline) {
+			break
 		}
-		if i < attempts-1 {
-			time.Sleep(delay)
+		if isTTY {
+			fmt.Fprintf(os.Stderr, "\r\033[K扇贝后端在准备今日数据…已等 %ds", int(now.Sub(start).Seconds()))
+		}
+		sleep := delay
+		if now.Add(sleep).After(deadline) {
+			sleep = deadline.Sub(now)
+		}
+		time.Sleep(sleep)
+		if delay = delay * 3 / 2; delay > maxDelay {
+			delay = maxDelay
 		}
 	}
 	if isTTY {
