@@ -11,7 +11,12 @@ import (
 //
 // 全部只读、不改进度。任何错误都吞掉——这条链路的价值全在副作用(唤醒后端),
 // 返回值本身不用。
+//
+// /abc/applets/user_applets 是网页学习页 (/#/study/entry) init 的第一步
+// (fetchUserApplets),它拉起的是 dashboard API 触达不到的学习页后端链路;
+// 排查跨零点 412 久等时发现单靠首页 dashboard 预热唤不醒这条链路,补上它。
 var warmupPaths = []string{
+	"/abc/applets/user_applets",
 	"/wordsapp/user_desk",
 	"/wordsapp/user_desk/finished_material_books",
 	"/wordsapp/material_book_learning_tasks",

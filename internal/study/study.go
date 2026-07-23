@@ -133,6 +133,42 @@ func LoadQueue(c *api.Client, mbid string, content Content) (*Session, error) {
 	}, nil
 }
 
+// LoadTurn 并发拉取今日内容池 (today_learning_items) 与工作队列 (statuses +
+// items/sync) 三路,各自穿过 412 轮询,全部就绪后 join 成一个 Session。
+//
+// 网页版学习页 init 就是这三路并发发起;CLI 原本在 loadTurnCmd 里串行
+// (LoadContent 卡在 412 轮询时 statuses/sync 还没出门),改并发让后端被多路
+// 同时戳、ready 更快,也避免某一路卡住时其余两路干等。content 日内稳定,
+// 首组拉一次即可,后续组仍走 LoadQueue 复用 m.content 只刷 status+sync。
+func LoadTurn(c *api.Client, mbid string, withReview bool) (*Session, error) {
+	var (
+		content                         Content
+		status                          *api.BookStatus
+		queue                           *api.SyncItems
+		contentErr, statusErr, queueErr error
+		wg                              sync.WaitGroup
+	)
+	wg.Add(3)
+	go func() { defer wg.Done(); content, contentErr = LoadContent(c, mbid, withReview) }()
+	go func() { defer wg.Done(); status, statusErr = c.BookStatus(mbid) }()
+	go func() { defer wg.Done(); queue, queueErr = c.BookSync(mbid) }()
+	wg.Wait()
+	if contentErr != nil {
+		return nil, fmt.Errorf("content: %w", contentErr)
+	}
+	if statusErr != nil {
+		return nil, fmt.Errorf("status: %w", statusErr)
+	}
+	if queueErr != nil {
+		return nil, fmt.Errorf("sync: %w", queueErr)
+	}
+	return &Session{
+		MBID: mbid, Date: status.Date, LearningTime: status.LearningTime,
+		CanNextTurn: status.CanInitNextTurn,
+		AItems:      queue.ANotFinished, CItems: queue.CNotFinished, Content: content,
+	}, nil
+}
+
 // Load does a full load (content + queue) in one call. Kept for the first turn
 // and the line-mode fallback; hot paths reuse content via LoadContent+LoadQueue.
 func Load(c *api.Client, mbid string, withReviewContent bool) (*Session, error) {

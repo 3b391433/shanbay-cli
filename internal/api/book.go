@@ -98,7 +98,9 @@ func bookPath(mbid, suffix string) string {
 // 首次 412 时会补一次 Warmup(),模仿网页首页那批并发预取,把后端下游服务
 // 都唤醒一下——观测:网页"秒进"就是靠这批预热。
 //
-// TTY 上原地刷新"已等 Ns"进度条,提示这是真等待不是 hang。
+// 进度报告二选一:若 Client.OnWait 非 nil 则回调它(TUI 用此把"已等 Ns"
+// 刷进 loading 视图,不碰 stderr——bubbletea 会打乱 stderr);否则在 TTY
+// 上原地刷新 stderr 进度条,提示这是真等待不是 hang。
 func (c *Client) retryNotReady(fn func() error) error {
 	const (
 		initialDelay = 300 * time.Millisecond
@@ -106,6 +108,12 @@ func (c *Client) retryNotReady(fn func() error) error {
 		maxWait      = 5 * time.Minute
 	)
 	isTTY := isatty.IsTerminal(os.Stderr.Fd())
+	stderrProgress := isTTY && c.OnWait == nil
+	clear := func() {
+		if stderrProgress {
+			fmt.Fprint(os.Stderr, "\r\033[K")
+		}
+	}
 	start := time.Now()
 	deadline := start.Add(maxWait)
 	delay := initialDelay
@@ -113,9 +121,7 @@ func (c *Client) retryNotReady(fn func() error) error {
 	var err error
 	for {
 		if err = fn(); !errors.Is(err, ErrDataNotReady) {
-			if isTTY {
-				fmt.Fprint(os.Stderr, "\r\033[K")
-			}
+			clear()
 			return err
 		}
 		// 第一次 412 才补预热——避免每次调用都重复戳
@@ -124,8 +130,11 @@ func (c *Client) retryNotReady(fn func() error) error {
 		if !now.Before(deadline) {
 			break
 		}
-		if isTTY {
-			fmt.Fprintf(os.Stderr, "\r\033[K扇贝后端在准备今日数据…已等 %ds", int(now.Sub(start).Seconds()))
+		elapsed := now.Sub(start)
+		if c.OnWait != nil {
+			c.OnWait(elapsed)
+		} else if stderrProgress {
+			fmt.Fprintf(os.Stderr, "\r\033[K扇贝后端在准备今日数据…已等 %ds", int(elapsed.Seconds()))
 		}
 		sleep := delay
 		if now.Add(sleep).After(deadline) {
@@ -136,9 +145,7 @@ func (c *Client) retryNotReady(fn func() error) error {
 			delay = maxDelay
 		}
 	}
-	if isTTY {
-		fmt.Fprint(os.Stderr, "\r\033[K")
-	}
+	clear()
 	return err
 }
 

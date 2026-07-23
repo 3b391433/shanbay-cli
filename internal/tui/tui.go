@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -104,6 +106,8 @@ type Model struct {
 	doneMsg    string
 	err        error
 
+	loadingHint string // phaseLoading 期间的进度文案(由 412 轮询回调回传)
+
 	checkinTried bool         // 已尝试过自动打卡(每次会话仅一次)
 	checkin      *api.Checkin // 打卡后的状态(nil=未打卡)
 	checkinJust  bool         // 本次刚打的卡(区分「已打过」)
@@ -132,6 +136,12 @@ type checkinResultMsg struct {
 	just  bool
 	err   error
 }
+
+// tickMsg 由 phaseLoading 期间的 500ms ticker 发出;hint 指向 loadTurnCmd 闭包
+// 内的 atomic 计数器——retryNotReady 的 OnWait 回调把"已等秒数"写进去,
+// tick 读它刷新 loadingHint。hint 沿 tick 链传递以持续 tick。
+type tickMsg struct{ hint *atomic.Int64 }
+
 type errMsg struct{ err error }
 
 // New builds the initial model.
@@ -153,18 +163,31 @@ func (m Model) Init() tea.Cmd { return m.loadTurnCmd() }
 // after 再来一组 (NextTurn may add new words), forcing a content refresh then.
 func (m Model) loadTurnCmd() tea.Cmd {
 	cfg, first, prevSig, content := m.cfg, m.turn == 0, m.prevSig, m.content
-	return func() tea.Msg {
-		if content == nil {
-			c, err := study.LoadContent(cfg.Client, cfg.MBID, cfg.Review)
-			if err != nil {
-				return errMsg{err}
+	hint := &atomic.Int64{}
+	load := func() tea.Msg {
+		// 注入进度回调:retryNotReady 在 412 退避前把"已等秒数"写进 hint
+		// (取 max 抵消多路并发各自计时起点的抖动),TUI ticker 读它刷新
+		// loadingHint;用完清空,避免串到 submit/nextTurn 等无关路径。
+		cfg.Client.OnWait = func(elapsed time.Duration) {
+			if s := int64(elapsed.Seconds()); s > hint.Load() {
+				hint.Store(s)
 			}
-			content = c
 		}
-		sess, err := study.LoadQueue(cfg.Client, cfg.MBID, content)
+		defer func() { cfg.Client.OnWait = nil }()
+		// 首组(content==nil)用 LoadTurn 三路并发拉 content+status+sync,
+		// 跨零点 412 久等时后端被多路同时戳、ready 更快;后续组复用
+		// m.content,只走 LoadQueue 两路并发刷 status+sync。
+		var sess *study.Session
+		var err error
+		if content == nil {
+			sess, err = study.LoadTurn(cfg.Client, cfg.MBID, cfg.Review)
+		} else {
+			sess, err = study.LoadQueue(cfg.Client, cfg.MBID, content)
+		}
 		if err != nil {
 			return errMsg{err}
 		}
+		content = sess.Content
 		cards := sess.Cards(cfg.Review, cfg.Mixed)
 		if len(cards) == 0 {
 			return turnEmptyMsg{first: first, canNext: sess.CanNextTurn}
@@ -175,6 +198,10 @@ func (m Model) loadTurnCmd() tea.Cmd {
 		}
 		return turnLoadedMsg{sess: sess, cards: cards, sig: sigOf(sess), content: content}
 	}
+	tick := tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+		return tickMsg{hint: hint}
+	})
+	return tea.Batch(load, tick)
 }
 
 func (m Model) submitCmd() tea.Cmd {
@@ -268,6 +295,21 @@ func (m Model) examplesCmd(id string) tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tickMsg:
+		// 离开 loading 就停 tick,避免在 studying/submitting 阶段空转刷新。
+		if m.phase != phaseLoading {
+			return m, nil
+		}
+		if msg.hint != nil {
+			if s := msg.hint.Load(); s > 0 {
+				m.loadingHint = fmt.Sprintf("扇贝后端在准备今日数据…已等 %ds", s)
+			} else {
+				m.loadingHint = "" // 新一轮 hint 从 0 起,清掉上一轮残留文案
+			}
+		}
+		return m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+			return tickMsg{hint: msg.hint}
+		})
 	case errMsg:
 		m.phase, m.err = phaseError, msg.err
 		return m, tea.Quit
@@ -495,6 +537,9 @@ func (m Model) bookTitle() string {
 func (m Model) View() string {
 	switch m.phase {
 	case phaseLoading:
+		if m.loadingHint != "" {
+			return "\n  " + m.loadingHint + "\n"
+		}
 		return "\n  加载中…\n"
 	case phaseSubmitting:
 		return "\n  提交中…\n"

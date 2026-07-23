@@ -31,6 +31,14 @@ var ErrUnauthorized = errors.New("登录态失效")
 type Client struct {
 	creds *auth.Credentials
 	http  *http.Client
+
+	// OnWait, 若非 nil, 在 retryNotReady 每次 412 退避前被调用,参数是本次
+	// 轮询已等待的时长。用于把"扇贝后端在准备今日数据"的进度回传给调用方
+	// (TUI 用它刷新 loading 视图)而非写 stderr——bubbletea 会打乱 stderr
+	// 输出,终端里根本看不到。非 nil 时抑制 stderr 进度条;为 nil 则维持
+	// 原行为(终端原地刷新"已等 Ns")。单 client 顺序使用,设置方负责用完
+	// 清空,避免串到无关调用路径。
+	OnWait func(elapsed time.Duration)
 }
 
 func New(creds *auth.Credentials) *Client {
