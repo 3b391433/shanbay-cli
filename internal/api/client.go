@@ -45,6 +45,12 @@ func New(creds *auth.Credentials) *Client {
 	return &Client{creds: creds, http: &http.Client{Timeout: 30 * time.Second}}
 }
 
+// WithWait returns an independent callback configuration while sharing the safe
+// HTTP connection pool. Concurrent background work must not mutate OnWait.
+func (c *Client) WithWait(wait func(time.Duration)) *Client {
+	return &Client{creds: c.creds, http: c.http, OnWait: wait}
+}
+
 func (c *Client) do(method, path string, reqBody []byte) (body []byte, status int, err error) {
 	var rdr io.Reader
 	if reqBody != nil {

@@ -285,7 +285,8 @@ func reportCheckin(c *api.Client) {
 	}
 }
 
-func runStudy(c *api.Client, args []string) error {
+func runStudy(c *api.Client, args []string) (runErr error) {
+	defer audio.Stop()
 	fs := flag.NewFlagSet("study", flag.ExitOnError)
 	newOnly := fs.Bool("new-only", false, "只背新词(默认含复习)")
 	order := fs.String("order", "mixed", "排列: mixed(混合) | new-first(先新后复)")
@@ -324,13 +325,17 @@ func runStudy(c *api.Client, args []string) error {
 	// Default to the TUI in an interactive terminal; fall back to the line UI
 	// for --plain, --dry-run, or when stdin is not a TTY (piped/CI).
 	if !*plain && !*dry && isTTY() {
-		prog := tea.NewProgram(tui.New(tui.Config{
+		model := tui.New(tui.Config{
 			Client: c, MBID: mbid, BookName: book.Materialbook.Name,
 			Review: review, Audio: useAudio, Limit: *limit,
 			Group: *group, Mixed: mixed, Keys: keys,
 			Checkin: !*noCheckin,
-		}))
+		})
+		prog := tea.NewProgram(model)
 		fm, err := prog.Run()
+		if submitErr := model.WaitSubmissions(); submitErr != nil {
+			return submitErr
+		}
 		audio.Stop() // stop any clip still playing when the TUI exits
 		if err != nil {
 			return err
@@ -341,10 +346,17 @@ func runStudy(c *api.Client, args []string) error {
 		return nil
 	}
 
+	submitter := study.NewSubmitter(c, mbid)
+	defer func() {
+		if err := submitter.Wait(); err != nil {
+			runErr = err
+		}
+	}()
 	sc := bufio.NewScanner(os.Stdin)
 	start := time.Now()
 	totalKnown := 0
 	prevSig := ""
+	var local *study.Session
 	var content study.Content // 当天内容池:一次加载跨组复用(再来一组后置 nil 重拉)
 
 	for turn := 1; turn <= 100; turn++ {
@@ -355,9 +367,18 @@ func runStudy(c *api.Client, args []string) error {
 			}
 			content = loaded
 		}
-		sess, err := study.LoadQueue(c, mbid, content)
-		if err != nil {
+		if err := submitter.Err(); err != nil {
 			return err
+		}
+		sess := local
+		if sess == nil || len(sess.Cards(review, mixed)) == 0 {
+			if err := submitter.Wait(); err != nil {
+				return err
+			}
+			sess, err = study.LoadQueue(c, mbid, content)
+			if err != nil {
+				return err
+			}
 		}
 		cards := sess.Cards(review, mixed)
 		if len(cards) == 0 {
@@ -369,6 +390,7 @@ func runStudy(c *api.Client, args []string) error {
 					}
 					prevSig = ""
 					content = nil // 再来一组可能加入新词,失效内容缓存重新拉取
+					local = nil
 					continue
 				}
 			}
@@ -411,10 +433,12 @@ func runStudy(c *api.Client, args []string) error {
 		groupTotal := len(queue)
 		quit, touched := false, false
 		for len(queue) > 0 {
+			audio.Stop()
 			card := queue[0]
 			fmt.Printf("[已会 %d/%d] %s   /%s/\n", groupTotal-len(queue), groupTotal, card.Word, card.IPAUS)
 			if useAudio && card.AudioUS != "" {
-				go audio.Play(card.AudioUS) //nolint:errcheck // best-effort
+				play := audio.Prepare(card.AudioUS)
+				go func() { _ = play() }()
 			}
 			fmt.Print("       (回车看释义) ")
 			if !sc.Scan() {
@@ -483,12 +507,14 @@ func runStudy(c *api.Client, args []string) error {
 			fmt.Println(string(pretty))
 			return nil
 		}
-		if err := c.SubmitItems(mbid, body); err != nil {
-			return err
-		}
+		audio.Stop()
+		submitSess := *sess
+		submitSess.LearningTime = body.LearningTime
+		submitter.Enqueue(&submitSess, grades)
+		local = sess.Remaining(grades)
 		nk := len(body.AItemsKnown) + len(body.CItemsKnown)
 		totalKnown += nk
-		fmt.Printf("  ✓ 第 %d 组已提交(学会 %d)\n", turn, nk)
+		fmt.Printf("  ↗ 第 %d 组已加入后台提交(学会 %d)\n", turn, nk)
 
 		if quit {
 			break
@@ -499,6 +525,9 @@ func runStudy(c *api.Client, args []string) error {
 		prevSig = sig
 	}
 
+	if err := submitter.Wait(); err != nil {
+		return err
+	}
 	if totalKnown > 0 {
 		fmt.Printf("\n本次学会 %d 词。\n", totalKnown)
 		if st, err := c.BookStatus(mbid); err == nil {

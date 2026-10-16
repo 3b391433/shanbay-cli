@@ -81,7 +81,9 @@ type Config struct {
 
 // Model is the bubbletea model (exported so callers can read Err after Run).
 type Model struct {
-	cfg Config
+	cfg       Config
+	submitter *study.Submitter
+	pending   int
 
 	phase       phase
 	sess        *study.Session
@@ -126,6 +128,7 @@ type reloadMsg struct{}
 type submittedMsg struct {
 	status  *api.BookStatus
 	learned int
+	err     error
 }
 type examplesLoadedMsg struct {
 	id       string
@@ -149,11 +152,23 @@ func New(cfg Config) Model {
 	if cfg.Keys.Empty() {
 		cfg.Keys = keymap.Default()
 	}
-	return Model{cfg: cfg, phase: phaseLoading, grades: map[string]study.Grade{}, knownStreak: map[string]int{}, seen: map[string]bool{}, examples: map[string][]api.Example{}}
+	var submitter *study.Submitter
+	if cfg.Client != nil {
+		submitter = study.NewSubmitter(cfg.Client, cfg.MBID)
+	}
+	return Model{submitter: submitter, cfg: cfg, phase: phaseLoading, grades: map[string]study.Grade{}, knownStreak: map[string]int{}, seen: map[string]bool{}, examples: map[string][]api.Example{}}
 }
 
 // Err returns a terminal error (e.g. auth failure) so the caller can re-login.
 func (m Model) Err() error { return m.err }
+
+// WaitSubmissions drains accepted writes even if the terminal interrupts Run.
+func (m Model) WaitSubmissions() error {
+	if m.submitter != nil {
+		return m.submitter.Wait()
+	}
+	return nil
+}
 
 func (m Model) Init() tea.Cmd { return m.loadTurnCmd() }
 
@@ -168,21 +183,20 @@ func (m Model) loadTurnCmd() tea.Cmd {
 		// 注入进度回调:retryNotReady 在 412 退避前把"已等秒数"写进 hint
 		// (取 max 抵消多路并发各自计时起点的抖动),TUI ticker 读它刷新
 		// loadingHint;用完清空,避免串到 submit/nextTurn 等无关路径。
-		cfg.Client.OnWait = func(elapsed time.Duration) {
+		client := cfg.Client.WithWait(func(elapsed time.Duration) {
 			if s := int64(elapsed.Seconds()); s > hint.Load() {
 				hint.Store(s)
 			}
-		}
-		defer func() { cfg.Client.OnWait = nil }()
+		})
 		// 首组(content==nil)用 LoadTurn 三路并发拉 content+status+sync,
 		// 跨零点 412 久等时后端被多路同时戳、ready 更快;后续组复用
 		// m.content,只走 LoadQueue 两路并发刷 status+sync。
 		var sess *study.Session
 		var err error
 		if content == nil {
-			sess, err = study.LoadTurn(cfg.Client, cfg.MBID, cfg.Review)
+			sess, err = study.LoadTurn(client, cfg.MBID, cfg.Review)
 		} else {
-			sess, err = study.LoadQueue(cfg.Client, cfg.MBID, content)
+			sess, err = study.LoadQueue(client, cfg.MBID, content)
 		}
 		if err != nil {
 			return errMsg{err}
@@ -204,16 +218,29 @@ func (m Model) loadTurnCmd() tea.Cmd {
 	return tea.Batch(load, tick)
 }
 
-func (m Model) submitCmd() tea.Cmd {
-	cfg, sess, grades := m.cfg, m.sess, m.grades
-	learnedN := learned(grades)
-	return func() tea.Msg {
-		if err := cfg.Client.SubmitItems(cfg.MBID, sess.BuildSubmit(grades, sess.LearningTime)); err != nil {
-			return errMsg{err}
-		}
-		st, _ := cfg.Client.BookStatus(cfg.MBID)
-		return submittedMsg{status: st, learned: learnedN}
+// submitGroup queues a write and starts the next local group immediately.
+func (m Model) submitGroup() (tea.Model, tea.Cmd) {
+	audio.Stop()
+	if m.submitter == nil { // Models constructed by unit tests have no API client.
+		m.phase = phaseSubmitting
+		return m, func() tea.Msg { return submittedMsg{} }
 	}
+	result := m.submitter.Enqueue(m.sess, m.grades)
+	m.pending++
+	m.totalKnown += learned(m.grades)
+	m.sess = m.sess.Remaining(m.grades)
+	wait := func() tea.Msg { return submittedMsg{err: <-result} }
+	if m.quitting {
+		m.phase = phaseSubmitting
+		return m, wait
+	}
+	cards := m.sess.Cards(m.cfg.Review, m.cfg.Mixed)
+	if len(cards) == 0 || (m.cfg.Limit > 0 && m.totalKnown >= m.cfg.Limit) {
+		m.phase = phaseSubmitting
+		return m, wait
+	}
+	next, cmd := m.Update(turnLoadedMsg{sess: m.sess, cards: cards, content: m.content, sig: sigOf(m.sess)})
+	return next, tea.Batch(wait, cmd)
 }
 
 // nextTurnCmd requests another group ("再来一组") then reloads.
@@ -241,6 +268,12 @@ func (m Model) checkinCmd() tea.Cmd {
 // away. Reaching here means the day's task is done or the user is leaving — the
 // check-in itself is gated server-side, so it's a no-op unless truly eligible.
 func (m Model) finish() (tea.Model, tea.Cmd) {
+	audio.Stop()
+	if m.pending > 0 {
+		m.quitting = true
+		m.phase = phaseSubmitting
+		return m, nil
+	}
 	if m.cfg.Checkin && !m.checkinTried {
 		m.checkinTried = true
 		m.phase = phaseCheckin
@@ -262,8 +295,8 @@ func (m Model) audioCmd() tea.Cmd {
 	if !m.cfg.Audio || len(m.cards) == 0 || m.cards[0].AudioUS == "" {
 		return nil
 	}
-	url := m.cards[0].AudioUS
-	return func() tea.Msg { _ = audio.Play(url); return nil }
+	play := audio.Prepare(m.cards[0].AudioUS)
+	return func() tea.Msg { _ = play(); return nil }
 }
 
 // exampleAudioCmd plays the current card's first example sentence audio.
@@ -273,7 +306,8 @@ func (m Model) exampleAudioCmd() tea.Cmd {
 	}
 	for _, e := range m.examples[m.cards[0].ItemID] {
 		if u := e.AudioURL(); u != "" {
-			return func() tea.Msg { _ = audio.Play(u); return nil }
+			play := audio.Prepare(u)
+			return func() tea.Msg { _ = play(); return nil }
 		}
 	}
 	return nil
@@ -294,6 +328,21 @@ func (m Model) examplesCmd(id string) tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Background messages update the hidden screen while the boss screen stays
+	// visible. In particular a completed submission must not restore an obsolete
+	// phaseSubmitting when the boss key is pressed again.
+	if m.phase == phaseBoss {
+		if _, key := msg.(tea.KeyMsg); !key {
+			m.phase = m.bossReturn
+			next, cmd := m.Update(msg)
+			updated := next.(Model)
+			if updated.phase != phaseDone && updated.phase != phaseError {
+				updated.bossReturn, updated.phase = updated.phase, phaseBoss
+			}
+			return updated, cmd
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tickMsg:
 		// 离开 loading 就停 tick,避免在 studying/submitting 阶段空转刷新。
@@ -362,9 +411,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case submittedMsg:
-		m.totalKnown += msg.learned
-		m.status = msg.status
+		m.pending--
+		if msg.err != nil {
+			audio.Stop()
+			m.phase, m.err = phaseError, msg.err
+			return m, tea.Quit
+		}
+		if m.pending > 0 || m.phase == phaseStudying {
+			return m, nil
+		}
 		if m.quitting {
+			return m.finish()
+		}
+		if m.cfg.Limit > 0 && m.totalKnown >= m.cfg.Limit {
+			m.doneMsg = "已达本次上限。"
 			return m.finish()
 		}
 		m.phase = phaseLoading
@@ -381,7 +441,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
-		return m, tea.Quit
+		return m.requestQuit()
 	}
 	s := msg.String()
 	k := m.cfg.Keys
@@ -394,6 +454,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if keymap.Has(k.Boss, s) {
+		audio.Stop()
 		m.bossReturn = m.phase
 		m.phase = phaseBoss
 		return m, nil
@@ -411,23 +472,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.phase != phaseStudying {
 		if keymap.Has(k.Quit, s) {
-			return m, tea.Quit
+			return m.finish()
 		}
 		return m, nil
 	}
 
 	switch {
 	case keymap.Has(k.Quit, s):
-		m.quitting = true
-		// 把当前已判定的「认识/太简单」也记入提交
-		if m.curDone && m.curResult != study.Unknown && len(m.cards) > 0 {
-			m.grades[m.cards[0].ItemID] = m.curResult
-		}
-		if !m.touched {
-			return m.finish()
-		}
-		m.phase = phaseSubmitting
-		return m, m.submitCmd()
+		return m.requestQuit()
 	case keymap.Has(k.Audio, s):
 		if m.curDone {
 			return m, m.exampleAudioCmd()
@@ -454,6 +506,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) requestQuit() (tea.Model, tea.Cmd) {
+	audio.Stop()
+	m.quitting = true
+	if m.phase == phaseBoss {
+		m.phase = m.bossReturn
+	}
+	if m.phase == phaseStudying && m.touched {
+		if m.curDone && m.curResult != study.Unknown && len(m.cards) > 0 {
+			m.grades[m.cards[0].ItemID] = m.curResult
+		}
+		return m.submitGroup()
+	}
+	return m.finish()
+}
+
 // gradeForKey maps a key to a grade via the configured bindings.
 func (m Model) gradeForKey(s string) (study.Grade, bool) {
 	k := m.cfg.Keys
@@ -477,6 +544,7 @@ func (m *Model) grade(g study.Grade)    { m.setGrade(g); m.curDone = true }
 // 认识出队规则:本轮首次出现就认识 → 直接出队(初见即会,无需巩固);一旦判过
 // 不认识而重排队,则回到「连续两次认识」的巩固逻辑(ConsecutiveKnown)。
 func (m Model) advance() (tea.Model, tea.Cmd) {
+	audio.Stop()
 	id := m.cards[0].ItemID
 	firstSight := !m.seen[id]
 	m.seen[id] = true
@@ -503,8 +571,7 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 	}
 	m.curDone, m.curResult = false, study.Unknown
 	if len(m.cards) == 0 {
-		m.phase = phaseSubmitting
-		return m, m.submitCmd()
+		return m.submitGroup()
 	}
 	return m, m.onCardShown()
 }
@@ -542,7 +609,7 @@ func (m Model) View() string {
 		}
 		return "\n  加载中…\n"
 	case phaseSubmitting:
-		return "\n  提交中…\n"
+		return "\n  等待后台提交完成…\n"
 	case phaseCheckin:
 		return "\n  打卡中…\n"
 	case phaseMore:
@@ -594,6 +661,9 @@ func (m Model) studyView() string {
 	header := fmt.Sprintf("第 %d 组   已会 %d/%d   %s   队列 新%d/复习%d",
 		m.turn, m.groupDone, m.groupTotal, tag, len(m.sess.AItems), len(m.sess.CItems))
 
+	if m.pending > 0 {
+		header += fmt.Sprintf("   后台同步 %d 组", m.pending)
+	}
 	var b strings.Builder
 	b.WriteString(wordStyle.Render(card.Word))
 	if card.IPAUS != "" {

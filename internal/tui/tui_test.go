@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"github.com/3b391433/shanbay-cli/internal/auth"
+	"io"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -294,4 +298,89 @@ func TestSnapshot(t *testing.T) {
 	m.curDone, m.curResult = true, study.TooEasy
 	m.examples["a"] = []api.Example{{ContentEN: "He <vocab>rolled</vocab> the dice.", ContentCN: "他掷了骰子。"}}
 	t.Logf("REVEALED(太简单):\n%s", m.View())
+}
+
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestBackgroundSubmitAllowsNextGroupAndQuitWaits(t *testing.T) {
+	old := http.DefaultTransport
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var writes atomic.Int32
+	http.DefaultTransport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"date":"2026-10-16","learning_time":10}`
+		if r.Method == http.MethodPut {
+			entered <- struct{}{}
+			<-release
+			writes.Add(1)
+			body = `{}`
+		} else if strings.HasSuffix(r.URL.Path, "items/sync") {
+			body = `{"a_not_finished_items":[{"item_id":"a"},{"item_id":"b"}]}`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	defer func() { http.DefaultTransport = old }()
+	m := New(Config{Client: api.New(&auth.Credentials{}), MBID: "book", Group: 1})
+	m.phase = phaseStudying
+	m.sess = &study.Session{Date: "2026-10-16", AItems: []api.SyncItem{{ItemID: "a"}, {ItemID: "b"}}, Content: study.Content{"b": {Word: "bravo"}}}
+	m.content = m.sess.Content
+	m.cards = []study.Card{{ItemID: "a", Word: "alpha"}}
+	m.curDone, m.curResult, m.touched = true, study.Known, true
+	next, cmd := m.advance()
+	mm := next.(Model)
+	if cmd == nil || mm.phase != phaseStudying || len(mm.cards) != 1 || mm.cards[0].ItemID != "b" || mm.pending != 1 {
+		close(release)
+		_ = mm.WaitSubmissions()
+		t.Fatalf("did not immediately advance: %+v", mm)
+	}
+	<-entered // submission is still blocked, but bravo is already on screen
+	quit, qcmd := mm.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	qm := quit.(Model)
+	if qm.phase != phaseSubmitting || !qm.quitting || qcmd != nil {
+		t.Fatal("quit must wait for the background job")
+	}
+	close(release)
+	if err := qm.WaitSubmissions(); err != nil {
+		t.Fatal(err)
+	}
+	ended, ecmd := qm.Update(submittedMsg{})
+	if ended.(Model).phase != phaseDone || ecmd == nil || writes.Load() != 1 {
+		t.Fatal("drain must finish before quit")
+	}
+}
+
+func TestSubmittedMessagesMayArriveOutOfOrder(t *testing.T) {
+	m := studyingModel()
+	m.pending = 2
+	next, cmd := m.Update(submittedMsg{})
+	mm := next.(Model)
+	if mm.pending != 1 || mm.phase != phaseStudying || cmd != nil {
+		t.Fatal("first receipt interrupted studying")
+	}
+	next, cmd = mm.Update(submittedMsg{})
+	mm = next.(Model)
+	if mm.pending != 0 || mm.phase != phaseStudying || cmd != nil || mm.cards[0].ItemID != "a" {
+		t.Fatal("last receipt interrupted studying")
+	}
+}
+
+func TestBossScreenPreservesUpdatedBackgroundPhase(t *testing.T) {
+	m := studyingModel()
+	m.phase, m.bossReturn, m.pending = phaseBoss, phaseSubmitting, 1
+	next, cmd := m.Update(submittedMsg{})
+	mm := next.(Model)
+	if mm.phase != phaseBoss || mm.bossReturn != phaseLoading || mm.pending != 0 || cmd == nil {
+		t.Fatal("receipt exposed or did not update hidden screen")
+	}
+	next, _ = mm.Update(turnEmptyMsg{canNext: true})
+	mm = next.(Model)
+	if mm.phase != phaseBoss || mm.bossReturn != phaseMore {
+		t.Fatal("queue refresh exposed the hidden screen")
+	}
+	next, _ = mm.Update(key(keymap.First(mm.cfg.Keys.Boss)))
+	if next.(Model).phase != phaseMore {
+		t.Fatal("boss key restored stale submission phase")
+	}
 }

@@ -101,68 +101,78 @@ func installHint(goos string, has func(bin string) bool) string {
 }
 
 var cache = map[string]string{}
+var cacheMu sync.Mutex
 
-// Only one clip plays at a time: starting a new Play stops the previous one.
-// mu guards current, the process Play is currently waiting on.
+// Prepare reserves playback synchronously. Even if its returned task is scheduled
+// late, Stop or a newer Prepare cancels it before any download/player can start.
 var (
-	mu      sync.Mutex
-	current *exec.Cmd
+	mu            sync.Mutex
+	current       *exec.Cmd
+	cancelCurrent context.CancelFunc
 )
 
-// Play downloads (cached) and plays the audio at url, first stopping whatever is
-// already playing. Best-effort: any error is returned but callers typically
-// ignore it. No-op if no player or empty url.
-func Play(url string) error {
-	if player == nil || url == "" {
-		return nil
-	}
-	path, err := fetch(url)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	args := append(append([]string{}, player[1:]...), path)
-	cmd := exec.CommandContext(ctx, player[0], args...)
-
-	// Stop the previous clip, then register ourselves as the current one.
+func Prepare(url string) func() error {
 	mu.Lock()
 	stopLocked()
-	if err := cmd.Start(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	cancelCurrent = cancel
+	mu.Unlock()
+	return func() error {
+		defer cancel()
+		if player == nil || url == "" {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		path, err := fetch(ctx, url)
+		if err != nil {
+			return err
+		}
+		args := append(append([]string{}, player[1:]...), path)
+		cmd := exec.CommandContext(ctx, player[0], args...)
+		mu.Lock()
+		if err := ctx.Err(); err != nil {
+			mu.Unlock()
+			return err
+		}
+		if err := cmd.Start(); err != nil {
+			mu.Unlock()
+			return err
+		}
+		current = cmd
+		mu.Unlock()
+		err = cmd.Wait()
+		mu.Lock()
+		if current == cmd {
+			current = nil
+		}
 		mu.Unlock()
 		return err
 	}
-	current = cmd
-	mu.Unlock()
-
-	err = cmd.Wait()
-
-	// Deregister, unless a later Play already replaced (and killed) us.
-	mu.Lock()
-	if current == cmd {
-		current = nil
-	}
-	mu.Unlock()
-	return err
 }
 
-// Stop halts any clip currently playing. Safe to call when nothing is playing.
-func Stop() {
-	mu.Lock()
-	stopLocked()
-	mu.Unlock()
-}
+func Play(url string) error { return Prepare(url)() }
 
-// stopLocked kills the currently playing clip. The caller must hold mu.
+// Stop cancels pending downloads/tasks and stops the currently playing clip.
+func Stop() { mu.Lock(); stopLocked(); mu.Unlock() }
+
 func stopLocked() {
+	if cancelCurrent != nil {
+		cancelCurrent()
+		cancelCurrent = nil
+	}
 	if current != nil && current.Process != nil {
 		_ = current.Process.Kill()
 		current = nil
 	}
 }
 
-func fetch(url string) (string, error) {
-	if p, ok := cache[url]; ok {
+func fetch(ctx context.Context, url string) (string, error) {
+	cacheMu.Lock()
+	p, ok := cache[url]
+	cacheMu.Unlock()
+	if ok {
 		return p, nil
 	}
 	dir := filepath.Join(os.TempDir(), "shanbay-cli-audio")
@@ -175,19 +185,29 @@ func fetch(url string) (string, error) {
 	}
 	path := filepath.Join(dir, fmt.Sprintf("%x%s", sha1.Sum([]byte(url)), ext))
 	if _, err := os.Stat(path); err == nil {
+		cacheMu.Lock()
 		cache[url] = path
+		cacheMu.Unlock()
 		return path, nil
 	}
-	resp, err := http.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	tmp := path + ".part"
-	out, err := os.Create(tmp)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("audio: HTTP %d", resp.StatusCode)
+	}
+	out, err := os.CreateTemp(dir, ".audio-*.part")
 	if err != nil {
 		return "", err
 	}
+	tmp := out.Name()
+	defer os.Remove(tmp)
 	if _, err := io.Copy(out, resp.Body); err != nil {
 		out.Close()
 		return "", err
@@ -196,6 +216,8 @@ func fetch(url string) (string, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		return "", err
 	}
+	cacheMu.Lock()
 	cache[url] = path
+	cacheMu.Unlock()
 	return path, nil
 }
