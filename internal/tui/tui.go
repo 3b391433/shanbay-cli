@@ -1,6 +1,6 @@
 // Package tui is a bubbletea front-end for the study loop. A group's words form
 // a FIFO queue: 认识/太简单 removes a word, 不认识 rotates it to the back so it
-// comes around again — the group ends (and submits) only when every word is
+// comes around again. Progress is saved periodically; the group ends when every word is
 // known, or the user quits. It auto-plays pronunciation, reveals the definition
 // and examples after grading, and offers 再来一组 when the daily plan is done.
 package tui
@@ -81,9 +81,11 @@ type Config struct {
 
 // Model is the bubbletea model (exported so callers can read Err after Run).
 type Model struct {
-	cfg       Config
-	submitter *study.Submitter
-	pending   int
+	cfg          Config
+	submitter    *study.Submitter
+	pending      int
+	started      time.Time
+	learningBase int
 
 	phase       phase
 	sess        *study.Session
@@ -125,6 +127,12 @@ type turnLoadedMsg struct {
 }
 type turnEmptyMsg struct{ first, canNext bool }
 type reloadMsg struct{}
+type autosaveMsg struct{}
+
+func autosaveTick() tea.Cmd {
+	return tea.Tick(study.AutosaveInterval, func(time.Time) tea.Msg { return autosaveMsg{} })
+}
+
 type submittedMsg struct {
 	status  *api.BookStatus
 	learned int
@@ -170,7 +178,7 @@ func (m Model) WaitSubmissions() error {
 	return nil
 }
 
-func (m Model) Init() tea.Cmd { return m.loadTurnCmd() }
+func (m Model) Init() tea.Cmd { return tea.Batch(m.loadTurnCmd(), autosaveTick()) }
 
 // loadTurnCmd loads the next group. Today's content pool is day-stable, so it's
 // fetched once and reused (m.content); only status+sync are refreshed each group
@@ -225,22 +233,42 @@ func (m Model) submitGroup() (tea.Model, tea.Cmd) {
 		m.phase = phaseSubmitting
 		return m, func() tea.Msg { return submittedMsg{} }
 	}
-	result := m.submitter.Enqueue(m.sess, m.grades)
-	m.pending++
-	m.totalKnown += learned(m.grades)
-	m.sess = m.sess.Remaining(m.grades)
-	wait := func() tea.Msg { return submittedMsg{err: <-result} }
+	wait := m.saveProgress()
 	if m.quitting {
 		m.phase = phaseSubmitting
+		if m.pending == 0 {
+			return m.finish()
+		}
 		return m, wait
 	}
 	cards := m.sess.Cards(m.cfg.Review, m.cfg.Mixed)
 	if len(cards) == 0 || (m.cfg.Limit > 0 && m.totalKnown >= m.cfg.Limit) {
 		m.phase = phaseSubmitting
+		if m.pending == 0 {
+			return m.Update(submittedMsg{})
+		}
 		return m, wait
 	}
 	next, cmd := m.Update(turnLoadedMsg{sess: m.sess, cards: cards, content: m.content, sig: sigOf(m.sess)})
 	return next, tea.Batch(wait, cmd)
+}
+
+// saveProgress submits only completed words since the last snapshot. It leaves
+// the working queue, current answer and consolidation state untouched.
+func (m *Model) saveProgress() tea.Cmd {
+	if m.submitter == nil || len(m.grades) == 0 {
+		return nil
+	}
+	snapshot := *m.sess
+	if !m.started.IsZero() {
+		snapshot.LearningTime = m.learningBase + int(time.Since(m.started).Seconds())
+	}
+	result := m.submitter.Enqueue(&snapshot, m.grades)
+	m.pending++
+	m.totalKnown += learned(m.grades)
+	m.sess = m.sess.Remaining(m.grades)
+	m.grades = map[string]study.Grade{}
+	return func() tea.Msg { return submittedMsg{err: <-result} }
 }
 
 // nextTurnCmd requests another group ("再来一组") then reloads.
@@ -344,6 +372,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case autosaveMsg:
+		var save tea.Cmd
+		if m.phase == phaseStudying {
+			save = m.saveProgress()
+		}
+		return m, tea.Batch(save, autosaveTick())
 	case tickMsg:
 		// 离开 loading 就停 tick,避免在 studying/submitting 阶段空转刷新。
 		if m.phase != phaseLoading {
@@ -393,6 +427,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cards = cards[:rem]
 			}
 		}
+		if m.started.IsZero() {
+			m.started, m.learningBase = time.Now(), msg.sess.LearningTime
+		}
 		m.sess, m.cards, m.content = msg.sess, cards, msg.content
 		m.groupTotal, m.groupDone = len(cards), 0
 		m.curDone, m.curResult = false, study.Unknown
@@ -411,7 +448,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case submittedMsg:
-		m.pending--
+		if m.pending > 0 {
+			m.pending--
+		}
 		if msg.err != nil {
 			audio.Stop()
 			m.phase, m.err = phaseError, msg.err
@@ -573,7 +612,11 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 	if len(m.cards) == 0 {
 		return m.submitGroup()
 	}
-	return m, m.onCardShown()
+	var save tea.Cmd
+	if len(m.grades) >= study.AutosaveWords {
+		save = m.saveProgress()
+	}
+	return m, tea.Batch(save, m.onCardShown())
 }
 
 // ---- view ----

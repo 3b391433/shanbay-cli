@@ -1,6 +1,6 @@
 // Command sb is the shanbay vocabulary CLI. Bare `sb` runs `sb study`.
 //
-//	sb                        = sb study(默认背单词:每组 10、新词与复习混合)
+//	sb                        = sb study(默认背单词:全天一组、新词与复习混合)
 //	sb login                  粘贴 curl,解析并保存登录态
 //	sb status                 账号 / 当前词书 / 今日进度
 //	sb lookup <word>          查词
@@ -11,7 +11,7 @@
 //	sb study [flags]          背单词
 //	    --new-only            只背新词(默认含复习)
 //	    --order mixed|new-first  排列方式(默认 mixed 混合)
-//	    --group N             每组单词数(默认 10,0=整队列)
+//	    --group N             每组单词数(默认 0=全天队列)
 //	    --limit N             本次最多 N 个(0=直到清空)
 //	    --mute                关闭发音(默认开)
 //	    --plain               简易行模式(非 TUI)
@@ -33,9 +33,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -290,7 +292,7 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 	fs := flag.NewFlagSet("study", flag.ExitOnError)
 	newOnly := fs.Bool("new-only", false, "只背新词(默认含复习)")
 	order := fs.String("order", "mixed", "排列: mixed(混合) | new-first(先新后复)")
-	group := fs.Int("group", 10, "每组单词数(0=整队列一次过)")
+	group := fs.Int("group", 0, "每组单词数(0=整队列一次过)")
 	limit := fs.Int("limit", 0, "本次最多背 N 个(0=直到清空)")
 	dry := fs.Bool("dry-run", false, "只打印将提交的 body,不发送")
 	mute := fs.Bool("mute", false, "关闭发音(默认开)")
@@ -352,8 +354,28 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 			runErr = err
 		}
 	}()
-	sc := bufio.NewScanner(os.Stdin)
+	input := newLineInput(os.Stdin)
+	defer input.Close()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	ticker := time.NewTicker(study.AutosaveInterval)
+	defer ticker.Stop()
+	var flush func()
+	var inputErr error
+	var answer string
+	scan := func() bool {
+		text, ok, err := input.Next(ticker.C, signals, func() error {
+			if flush != nil {
+				flush()
+			}
+			return submitter.Err()
+		})
+		answer, inputErr = text, err
+		return ok
+	}
 	start := time.Now()
+	learningBase := -1
 	totalKnown := 0
 	prevSig := ""
 	var local *study.Session
@@ -380,11 +402,14 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 				return err
 			}
 		}
+		if learningBase < 0 {
+			learningBase = sess.LearningTime
+		}
 		cards := sess.Cards(review, mixed)
 		if len(cards) == 0 {
 			if sess.CanNextTurn && !*dry {
 				fmt.Print("\n🎉 本轮完成。再来一组?[y/N]: ")
-				if sc.Scan() && strings.TrimSpace(strings.ToLower(sc.Text())) == "y" {
+				if scan() && strings.TrimSpace(strings.ToLower(answer)) == "y" {
 					if err := c.NextTurn(mbid); err != nil {
 						return err
 					}
@@ -393,6 +418,9 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 					local = nil
 					continue
 				}
+			}
+			if inputErr != nil {
+				return inputErr
 			}
 			if turn == 1 {
 				fmt.Println("队列为空 — 今天没有待学/待复习的词(或已全部完成)。")
@@ -432,6 +460,17 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 		queue := append([]study.Card{}, prompt...)
 		groupTotal := len(queue)
 		quit, touched := false, false
+		flush = func() {
+			if *dry || len(grades) == 0 {
+				return
+			}
+			snapshot := *sess
+			snapshot.LearningTime = learningBase + int(time.Since(start).Seconds())
+			submitter.Enqueue(&snapshot, grades)
+			totalKnown += len(grades)
+			sess = sess.Remaining(grades)
+			grades = map[string]study.Grade{}
+		}
 		for len(queue) > 0 {
 			audio.Stop()
 			card := queue[0]
@@ -441,7 +480,7 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 				go func() { _ = play() }()
 			}
 			fmt.Print("       (回车看释义) ")
-			if !sc.Scan() {
+			if !scan() {
 				quit = true
 				break
 			}
@@ -449,11 +488,11 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 				fmt.Println("       " + d)
 			}
 			fmt.Print("       1=认识 2=不认识 3=太简单 q=退出: ")
-			if !sc.Scan() {
+			if !scan() {
 				quit = true
 				break
 			}
-			ans := strings.ToLower(strings.TrimSpace(sc.Text()))
+			ans := strings.ToLower(strings.TrimSpace(answer))
 			firstSight := !seen[card.ItemID]
 			seen[card.ItemID] = true
 			switch {
@@ -485,13 +524,20 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 				touched = true
 				fmt.Println("       ✗ 不认识,稍后再来")
 			}
+			if len(grades) >= study.AutosaveWords {
+				flush()
+			}
+			if err := submitter.Err(); err != nil {
+				return err
+			}
 			if quit {
 				break
 			}
 			fmt.Println()
 		}
-		if err := sc.Err(); err != nil {
-			return err
+		if inputErr != nil {
+			flush()
+			return inputErr
 		}
 		if !touched {
 			if turn == 1 {
@@ -500,7 +546,7 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 			break
 		}
 
-		body := sess.BuildSubmit(grades, sess.LearningTime+int(time.Since(start).Seconds()))
+		body := sess.BuildSubmit(grades, learningBase+int(time.Since(start).Seconds()))
 		if *dry {
 			pretty, _ := json.MarshalIndent(body, "", "  ")
 			fmt.Println("\n--- DRY RUN: 第 1 组将提交的 body(未发送) ---")
@@ -508,13 +554,11 @@ func runStudy(c *api.Client, args []string) (runErr error) {
 			return nil
 		}
 		audio.Stop()
-		submitSess := *sess
-		submitSess.LearningTime = body.LearningTime
-		submitter.Enqueue(&submitSess, grades)
-		local = sess.Remaining(grades)
-		nk := len(body.AItemsKnown) + len(body.CItemsKnown)
-		totalKnown += nk
-		fmt.Printf("  ↗ 第 %d 组已加入后台提交(学会 %d)\n", turn, nk)
+		completed := groupTotal - len(queue)
+		flush()
+		flush = nil
+		local = sess
+		fmt.Printf("  ↗ 第 %d 组已加入后台提交(学会 %d)\n", turn, completed)
 
 		if quit {
 			break

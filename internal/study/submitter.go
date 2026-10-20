@@ -3,9 +3,13 @@ package study
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/3b391433/shanbay-cli/internal/api"
 )
+
+const AutosaveWords = 10
+const AutosaveInterval = 30 * time.Second
 
 // Submitter serializes background writes. A failed write stops later writes:
 // continuing from an uncertain server state could overwrite learning progress.

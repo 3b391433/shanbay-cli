@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"encoding/json"
+	"fmt"
 	"github.com/3b391433/shanbay-cli/internal/auth"
 	"io"
 	"net/http"
@@ -382,5 +384,110 @@ func TestBossScreenPreservesUpdatedBackgroundPhase(t *testing.T) {
 	next, _ = mm.Update(key(keymap.First(mm.cfg.Keys.Boss)))
 	if next.(Model).phase != phaseMore {
 		t.Fatal("boss key restored stale submission phase")
+	}
+}
+
+// Autosaves must preserve the in-progress group, including a revealed answer
+// and partially consolidated words, and never resubmit earlier learned words.
+func TestAutosavePreservesGroupAndSubmitsOnlyNewWords(t *testing.T) {
+	old := http.DefaultTransport
+	defer func() { http.DefaultTransport = old }()
+	var bodies []api.SubmitBody
+	http.DefaultTransport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"date":"2026-10-16","learning_time":10}`
+		if r.Method == http.MethodPut {
+			var payload api.SubmitBody
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				return nil, err
+			}
+			bodies = append(bodies, payload)
+			body = `{}`
+		} else if strings.HasSuffix(r.URL.Path, "items/sync") {
+			body = `{"a_not_finished_items":[{"item_id":"a"},{"item_id":"b"},{"item_id":"c"}]}`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	m := studyingModel()
+	m.sess.Date = "2026-10-16"
+	m.submitter = study.NewSubmitter(api.New(&auth.Credentials{}), "book")
+	m.cards = []study.Card{{ItemID: "b"}, {ItemID: "c"}}
+	m.grades["a"] = study.Known
+	m.seen["b"], m.knownStreak["b"] = true, 1
+	m.curDone, m.curResult = true, study.Known
+	m.groupTotal, m.groupDone = 3, 1
+	// Saving behind the boss screen must leave its hidden studying state intact.
+	m.phase, m.bossReturn = phaseBoss, phaseStudying
+	next, cmd := m.Update(autosaveMsg{})
+	m = next.(Model)
+	if cmd == nil || m.phase != phaseBoss || m.bossReturn != phaseStudying || m.totalKnown != 1 || m.pending != 1 || len(m.grades) != 0 {
+		t.Fatalf("bad autosave state: %+v", m)
+	}
+	if len(m.cards) != 2 || m.cards[0].ItemID != "b" || !m.curDone || m.curResult != study.Known || m.knownStreak["b"] != 1 || !m.seen["b"] || m.groupDone != 1 {
+		t.Fatal("autosave changed working group")
+	}
+	if err := m.WaitSubmissions(); err != nil {
+		t.Fatal(err)
+	}
+	next, cmd = m.Update(submittedMsg{})
+	m = next.(Model)
+	if cmd != nil || m.phase != phaseBoss || m.bossReturn != phaseStudying {
+		t.Fatal("receipt disturbed boss screen")
+	}
+	next, _ = m.Update(autosaveMsg{})
+	m = next.(Model)
+	if m.pending != 0 || m.totalKnown != 1 {
+		t.Fatal("empty timer duplicated progress")
+	}
+	m.grades["b"] = study.TooEasy
+	next, _ = m.Update(autosaveMsg{})
+	m = next.(Model)
+	if err := m.WaitSubmissions(); err != nil {
+		t.Fatal(err)
+	}
+	if m.totalKnown != 2 || len(bodies) != 2 || len(bodies[0].AItemsKnown) != 1 || bodies[0].AItemsKnown[0].ItemID != "a" || len(bodies[1].AItemsKnown) != 1 || bodies[1].AItemsKnown[0].ItemID != "b" {
+		t.Fatalf("duplicate/missing grades: %+v", bodies)
+	}
+}
+
+func TestAutosaveAfterTenCompletedWordsKeepsConsolidation(t *testing.T) {
+	// A nil API client intentionally disables actual writes, but the count branch
+	// is covered by a real offline submitter below.
+	old := http.DefaultTransport
+	defer func() { http.DefaultTransport = old }()
+	http.DefaultTransport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"date":"2026-10-16","learning_time":10}`
+		if r.Method == http.MethodPut {
+			body = `{}`
+		} else if strings.HasSuffix(r.URL.Path, "items/sync") {
+			body = `{"a_not_finished_items":[]}`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	m := studyingModel()
+	m.submitter = study.NewSubmitter(api.New(&auth.Credentials{}), "book")
+	m.sess.Date = "2026-10-16"
+	m.cards = nil
+	m.sess.AItems = nil
+	for i := 0; i < 11; i++ {
+		id := fmt.Sprint(i)
+		m.cards = append(m.cards, study.Card{ItemID: id})
+		m.sess.AItems = append(m.sess.AItems, api.SyncItem{ItemID: id})
+		m.examples[id] = []api.Example{}
+	}
+	for i := 0; i < 10; i++ {
+		m = step(m, "k")
+	}
+	if err := m.WaitSubmissions(); err != nil {
+		t.Fatal(err)
+	}
+	if m.phase != phaseStudying || m.pending != 1 || m.totalKnown != 10 || m.groupDone != 10 || len(m.grades) != 0 || len(m.cards) != 1 || m.cards[0].ItemID != "10" {
+		t.Fatalf("count save interrupted group: %+v", m)
+	}
+	next, _ := m.Update(submittedMsg{})
+	m = next.(Model)
+	next, cmd := m.Update(key("q"))
+	m = next.(Model)
+	if m.phase != phaseDone || cmd == nil || m.totalKnown != 10 {
+		t.Fatal("quit after save duplicated/hung")
 	}
 }
